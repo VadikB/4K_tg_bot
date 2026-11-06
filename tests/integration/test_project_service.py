@@ -20,6 +20,7 @@ from app.application.projects import (
 )
 from app.application.roles import RoleDraft, RoleService
 from app.db import session_factory
+from app.integrations.agent4k import ParticipantIdentityLink
 from app.models import (
     AssessmentAssignment,
     AuditEvent,
@@ -136,6 +137,55 @@ async def test_one_time_invitation_connects_telegram_identity(database_url: str)
 
     with pytest.raises(InvitationError, match="уже использовано"):
         await participants.accept_invitation(student, token=secret.token)
+
+
+async def test_participant_links_to_agent4k_idempotently(database_url: str) -> None:
+    class Adapter:
+        calls = 0
+
+        async def resolve_participant(self, *, email: str, display_name: str):
+            self.calls += 1
+            assert email == "student@example.edu"
+            assert display_name == "Студент"
+            return ParticipantIdentityLink(agent4k_user_id=42, status="provisioned")
+
+        async def issue_next_case(self, *, cycle_id: str, idempotency_key: str):
+            raise AssertionError("case endpoint must not be called")
+
+    factory = session_factory(database_url)
+    projects = ProjectService(factory, bootstrap_admin_ids=(1001,))
+    participants = ParticipantService(factory, invitation_ttl_hours=168)
+    admin = TelegramIdentity(1001, "Преподаватель", "teacher")
+    student = TelegramIdentity(2002, "Студент", "student")
+    await projects.ensure_actor(admin)
+    await projects.create_project(admin, sample_draft())
+    invitation = await participants.create_invitation(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_name="Ожидаемый студент",
+        participant_email="student@example.edu",
+    )
+    await participants.accept_invitation(student, token=invitation.token)
+    adapter = Adapter()
+
+    first = await participants.link_my_agent4k_identity(
+        student,
+        project_code="TBA-2026-G01",
+        adapter=adapter,
+    )
+    repeated = await participants.link_my_agent4k_identity(
+        student,
+        project_code="TBA-2026-G01",
+        adapter=adapter,
+    )
+
+    assert first.agent4k_user_id == 42 and first.created is True
+    assert repeated.agent4k_user_id == 42 and repeated.created is False
+    assert adapter.calls == 1
+    async with factory() as session:
+        member = await session.scalar(select(ProjectParticipant))
+        assert member is not None and member.agent4k_user_id == 42
+        assert member.agent4k_linked_at is not None
 
 
 async def test_expired_invitation_is_rejected(database_url: str) -> None:

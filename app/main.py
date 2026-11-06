@@ -10,6 +10,7 @@ from app.application.roles import RoleService
 from app.bot import build_dispatcher
 from app.config import Settings
 from app.db import session_factory
+from app.integrations.agent4k import DisabledAgent4KAdapter, HttpAgent4KAdapter
 
 
 async def run() -> None:
@@ -27,11 +28,25 @@ async def run() -> None:
     )
     role_service = RoleService(session_factory(settings.database_url))
     assessment_service = AssessmentService(session_factory(settings.database_url))
+    agent4k_adapter = (
+        HttpAgent4KAdapter(
+            base_url=settings.agent4k_api_url,
+            token=settings.agent4k_api_token,
+        )
+        if settings.agent4k_integration_mode.value == "http"
+        else DisabledAgent4KAdapter()
+    )
     try:
         await build_dispatcher(
-            project_service, participant_service, role_service, assessment_service
+            project_service,
+            participant_service,
+            role_service,
+            assessment_service,
+            agent4k_adapter,
         ).start_polling(bot)
     finally:
+        if isinstance(agent4k_adapter, HttpAgent4KAdapter):
+            await agent4k_adapter.close()
         await bot.session.close()
 
 

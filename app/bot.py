@@ -18,6 +18,7 @@ from app.application.projects import (
     TelegramIdentity,
 )
 from app.application.roles import RoleDraft, RoleError, RoleService, parse_items
+from app.integrations.agent4k import Agent4KPort, Agent4KUnavailableError
 
 router = Router()
 
@@ -93,6 +94,7 @@ async def start(
     command: CommandObject,
     project_service: ProjectService,
     participant_service: ParticipantService,
+    agent4k_adapter: Agent4KPort,
 ) -> None:
     if command.args:
         try:
@@ -106,6 +108,16 @@ async def start(
             f"Вы подключены к проекту {project.code} — {project.name}.\n"
             "Используйте /projects для просмотра карточки."
         )
+        try:
+            await participant_service.link_my_agent4k_identity(
+                identity_from_message(message),
+                project_code=project.code,
+                adapter=agent4k_adapter,
+            )
+        except (Agent4KUnavailableError, ValueError, AccessDeniedError, RuntimeError):
+            await message.answer(
+                "Связь с 4К пока не создана. Проект доступен; повторите позже командой /link_4k."
+            )
         return
     _, is_admin = await project_service.ensure_actor(identity_from_message(message))
     if is_admin:
@@ -333,10 +345,33 @@ async def participants(
     lines = [
         f"{item.display_name} — {item.status}"
         f" ({'Telegram подключён' if item.telegram_connected else 'ожидает входа'}; "
-        f"{'email задан' if item.email_configured else 'email не задан'})"
+        f"{'email задан' if item.email_configured else 'email не задан'}; "
+        f"{'4К подключён' if item.agent4k_connected else '4К ожидает'})"
         for item in items
     ]
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("link_4k"))
+async def link_4k(
+    message: Message,
+    command: CommandObject,
+    participant_service: ParticipantService,
+    agent4k_adapter: Agent4KPort,
+) -> None:
+    if not command.args:
+        await message.answer("Укажите код проекта: /link_4k TBA-2026-G01")
+        return
+    try:
+        await participant_service.link_my_agent4k_identity(
+            identity_from_message(message),
+            project_code=command.args,
+            adapter=agent4k_adapter,
+        )
+    except (ValueError, AccessDeniedError, Agent4KUnavailableError, RuntimeError) as exc:
+        await message.answer(f"Связь с 4К не создана: {exc}")
+        return
+    await message.answer("Связь участника с 4К активна.")
 
 
 @router.message(Command("new_role"))
@@ -720,12 +755,14 @@ def build_dispatcher(
     participant_service: ParticipantService,
     role_service: RoleService,
     assessment_service: AssessmentService,
+    agent4k_adapter: Agent4KPort,
 ) -> Dispatcher:
     dispatcher = Dispatcher(
         project_service=project_service,
         participant_service=participant_service,
         role_service=role_service,
         assessment_service=assessment_service,
+        agent4k_adapter=agent4k_adapter,
     )
     dispatcher.include_router(router)
     return dispatcher

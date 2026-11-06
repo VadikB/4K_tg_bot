@@ -39,6 +39,7 @@ python -m app.main
 /projects     доступные проекты
 /add_participant  создать одноразовое приглашение
 /participants CODE  участники проекта
+/link_4k CODE  повторить связь текущего участника с 4К
 /new_role     создать новую версию CRISP-DM-роли
 /publish_role PROJECT ROLE  опубликовать роль
 /roles PROJECT  версии ролей проекта
@@ -69,6 +70,11 @@ Bootstrap не делает все новые аккаунты админист�
 означает неизменяемость локального snapshot, но не runtime-допуск: до проверки через
 API 4К snapshot содержит `runtime_admission=pending_agent4k_verification`, а назначение
 не получает `external_cycle_id`.
+
+При принятии приглашения бот вызывает
+`POST /integration/v1/participants/resolve` и сохраняет полученный внутренний ID 4К.
+Если 4К недоступен, участие в проекте сохраняется, а связывание можно безопасно
+повторить командой `/link_4k CODE`. Email и Telegram ID не включаются в ответ API.
 
 ## Проверки
 

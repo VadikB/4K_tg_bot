@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.projects import AccessDeniedError, TelegramIdentity, normalize_project_code
+from app.integrations.agent4k import Agent4KPort
 from app.models import (
     AuditEvent,
     Invitation,
@@ -36,6 +37,14 @@ class ParticipantView:
     status: str
     telegram_connected: bool
     email_configured: bool
+    agent4k_connected: bool
+
+
+@dataclass(frozen=True)
+class ParticipantLinkView:
+    participant_id: int
+    agent4k_user_id: int
+    created: bool
 
 
 def normalize_email(value: str) -> str:
@@ -243,6 +252,80 @@ class ParticipantService:
                     status=item.status,
                     telegram_connected=item.user_id is not None,
                     email_configured=item.email is not None,
+                    agent4k_connected=item.agent4k_user_id is not None,
                 )
                 for item in rows
             ]
+
+    async def link_my_agent4k_identity(
+        self,
+        identity: TelegramIdentity,
+        *,
+        project_code: str,
+        adapter: Agent4KPort,
+        now: datetime | None = None,
+    ) -> ParticipantLinkView:
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        normalized_code = normalize_project_code(project_code)
+        async with self._session_factory() as session:
+            user = await _load_actor(session, identity)
+            participant = await session.scalar(
+                select(ProjectParticipant)
+                .join(Project, Project.id == ProjectParticipant.project_id)
+                .where(
+                    Project.code == normalized_code,
+                    ProjectParticipant.user_id == user.id,
+                    ProjectParticipant.status == "active",
+                )
+            )
+            if participant is None:
+                raise AccessDeniedError("Активное участие в проекте не найдено.")
+            if participant.agent4k_user_id is not None:
+                return ParticipantLinkView(
+                    participant.id,
+                    participant.agent4k_user_id,
+                    False,
+                )
+            if participant.email is None:
+                raise ValueError("Для участника не задан email.")
+            participant_id = participant.id
+            email = participant.email
+            display_name = participant.display_name
+
+        resolved = await adapter.resolve_participant(email=email, display_name=display_name)
+
+        async with self._session_factory.begin() as session:
+            participant = await session.get(
+                ProjectParticipant, participant_id, with_for_update=True
+            )
+            if participant is None or participant.user_id is None:
+                raise AccessDeniedError("Участник проекта больше не активен.")
+            user = await _load_actor(session, identity)
+            if participant.user_id != user.id or participant.email != email:
+                raise AccessDeniedError("Данные участника изменились; повторите связывание.")
+            if participant.agent4k_user_id is not None:
+                if participant.agent4k_user_id != resolved.agent4k_user_id:
+                    raise RuntimeError("Участник уже связан с другим пользователем 4К.")
+                return ParticipantLinkView(participant.id, participant.agent4k_user_id, False)
+            participant.agent4k_user_id = resolved.agent4k_user_id
+            participant.agent4k_linked_at = current
+            session.add(
+                AuditEvent(
+                    actor_user_id=user.id,
+                    project_id=participant.project_id,
+                    entity_type="project_participant",
+                    entity_id=str(participant.id),
+                    action="agent4k_identity_linked",
+                    payload_json={
+                        "agent4k_user_id": resolved.agent4k_user_id,
+                        "status": resolved.status,
+                    },
+                )
+            )
+            return ParticipantLinkView(
+                participant.id,
+                resolved.agent4k_user_id,
+                resolved.status == "provisioned",
+            )
