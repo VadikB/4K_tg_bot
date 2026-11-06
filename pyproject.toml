@@ -30,6 +30,7 @@ packages = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["integration: requires isolated PostgreSQL with test or pytest in database name"]
 
 [tool.ruff]
 line-length = 100
