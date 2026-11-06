@@ -64,6 +64,7 @@ def sample_draft(code: str = "TBA-2026-G01") -> ProjectDraft:
     return ProjectDraft(
         code=code,
         name="Прогноз спроса",
+        course_external_id="tba-2026-mba01",
         course="Технологии бизнес-аналитики",
         cohort="МБА-01",
         business_problem="Нет воспроизводимого прогноза",
@@ -253,6 +254,8 @@ def sample_role(code: str, name: str) -> RoleDraft:
         expected_outputs=("Артефакт проекта",),
         interactions=("Команда проекта",),
         crisp_dm_stages=("business_understanding", "data_understanding"),
+        agent4k_role_profile_version_id=17,
+        agent4k_role_profile_checksum="a" * 64,
     )
 
 
@@ -328,6 +331,12 @@ async def test_published_role_content_is_immutable(database_url: str) -> None:
             version = await session.scalar(select(ProjectRoleVersion))
             assert version is not None
             version.definition_json = {"changed": True}
+
+    with pytest.raises(DBAPIError, match="immutable"):
+        async with factory.begin() as session:
+            version = await session.scalar(select(ProjectRoleVersion))
+            assert version is not None
+            version.agent4k_role_profile_version_id = 99
 
 
 async def assessment_fixture(database_url: str) -> tuple[

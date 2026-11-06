@@ -26,6 +26,7 @@ router = Router()
 class ProjectWizard(StatesGroup):
     code = State()
     name = State()
+    course_external_id = State()
     course = State()
     cohort = State()
     business_problem = State()
@@ -50,6 +51,8 @@ class RoleWizard(StatesGroup):
     typical_tasks = State()
     expected_outputs = State()
     interactions = State()
+    agent4k_role_profile_version_id = State()
+    agent4k_role_profile_checksum = State()
     crisp_dm_stages = State()
 
 
@@ -188,6 +191,13 @@ async def project_code(message: Message, state: FSMContext) -> None:
 @router.message(ProjectWizard.name, F.text)
 async def project_name(message: Message, state: FSMContext) -> None:
     await state.update_data(name=message.text)
+    await state.set_state(ProjectWizard.course_external_id)
+    await message.answer("Стабильный машинный ID курса, например tba-2026-mba01:")
+
+
+@router.message(ProjectWizard.course_external_id, F.text)
+async def project_course_external_id(message: Message, state: FSMContext) -> None:
+    await state.update_data(course_external_id=message.text)
     await state.set_state(ProjectWizard.course)
     await message.answer("Название курса:")
 
@@ -439,6 +449,24 @@ async def role_outputs(message: Message, state: FSMContext) -> None:
 @router.message(RoleWizard.interactions, F.text)
 async def role_interactions(message: Message, state: FSMContext) -> None:
     await state.update_data(interactions=message.text or "")
+    await state.set_state(RoleWizard.agent4k_role_profile_version_id)
+    await message.answer("ID опубликованной RoleProfileVersion в 4К:")
+
+
+@router.message(RoleWizard.agent4k_role_profile_version_id, F.text)
+async def role_agent4k_version_id(message: Message, state: FSMContext) -> None:
+    value = (message.text or "").strip()
+    if not value.isdigit() or int(value) <= 0:
+        await message.answer("Введите положительный числовой ID версии роли 4К или /cancel.")
+        return
+    await state.update_data(agent4k_role_profile_version_id=int(value))
+    await state.set_state(RoleWizard.agent4k_role_profile_checksum)
+    await message.answer("SHA-256 checksum опубликованной версии роли 4К:")
+
+
+@router.message(RoleWizard.agent4k_role_profile_checksum, F.text)
+async def role_agent4k_checksum(message: Message, state: FSMContext) -> None:
+    await state.update_data(agent4k_role_profile_checksum=message.text)
     await state.set_state(RoleWizard.crisp_dm_stages)
     await message.answer(
         "Стадии CRISP-DM через ';': business_understanding; data_understanding; "
@@ -462,6 +490,8 @@ async def role_stages(
             expected_outputs=parse_items(str(data["expected_outputs"])),
             interactions=parse_items(str(data["interactions"])),
             crisp_dm_stages=parse_items(message.text or ""),
+            agent4k_role_profile_version_id=int(data["agent4k_role_profile_version_id"]),
+            agent4k_role_profile_checksum=str(data["agent4k_role_profile_checksum"]),
         )
         result = await role_service.create_draft(
             identity_from_message(message), project_code=project_code, draft=draft

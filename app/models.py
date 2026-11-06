@@ -52,6 +52,7 @@ class Project(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     code: Mapped[str] = mapped_column(String(64), unique=True)
     name: Mapped[str] = mapped_column(String(255))
+    course_external_id: Mapped[str | None] = mapped_column(String(128), index=True)
     course: Mapped[str] = mapped_column(String(255))
     cohort: Mapped[str | None] = mapped_column(String(128))
     business_problem: Mapped[str] = mapped_column(Text)
@@ -113,7 +114,16 @@ class ProjectRole(Base, TimestampMixin):
 
 class ProjectRoleVersion(Base, TimestampMixin):
     __tablename__ = "project_role_versions"
-    __table_args__ = (UniqueConstraint("project_role_id", "version", name="uq_role_version"),)
+    __table_args__ = (
+        UniqueConstraint("project_role_id", "version", name="uq_role_version"),
+        CheckConstraint(
+            "(agent4k_role_profile_version_id IS NULL AND "
+            "agent4k_role_profile_checksum IS NULL) OR "
+            "(agent4k_role_profile_version_id > 0 AND "
+            "agent4k_role_profile_checksum ~ '^[0-9a-f]{64}$')",
+            name="ck_project_role_agent4k_mapping",
+        ),
+    )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     project_role_id: Mapped[int] = mapped_column(
         ForeignKey("project_roles.id", ondelete="RESTRICT")
@@ -122,6 +132,8 @@ class ProjectRoleVersion(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), default="draft")
     definition_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
     source_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    agent4k_role_profile_version_id: Mapped[int | None] = mapped_column(BigInteger)
+    agent4k_role_profile_checksum: Mapped[str | None] = mapped_column(String(64))
     checksum: Mapped[str] = mapped_column(String(64))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

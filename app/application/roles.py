@@ -39,6 +39,8 @@ class RoleDraft:
     expected_outputs: tuple[str, ...]
     interactions: tuple[str, ...]
     crisp_dm_stages: tuple[str, ...]
+    agent4k_role_profile_version_id: int
+    agent4k_role_profile_checksum: str
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,11 @@ def validate_role_draft(draft: RoleDraft) -> RoleDraft:
     unknown = set(stages) - ALLOWED_STAGES
     if unknown:
         raise ValueError(f"Неизвестные стадии CRISP-DM: {', '.join(sorted(unknown))}.")
+    if draft.agent4k_role_profile_version_id <= 0:
+        raise ValueError("Выберите опубликованную версию роли 4К.")
+    role_checksum = draft.agent4k_role_profile_checksum.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", role_checksum):
+        raise ValueError("Checksum версии роли 4К должен быть SHA-256.")
     return RoleDraft(
         code=code,
         name=draft.name.strip(),
@@ -115,6 +122,8 @@ def validate_role_draft(draft: RoleDraft) -> RoleDraft:
         expected_outputs=tuple(item.strip() for item in draft.expected_outputs),
         interactions=tuple(item.strip() for item in draft.interactions),
         crisp_dm_stages=stages,
+        agent4k_role_profile_version_id=draft.agent4k_role_profile_version_id,
+        agent4k_role_profile_checksum=role_checksum,
     )
 
 
@@ -187,6 +196,10 @@ class RoleService:
                 "expected_outputs": list(validated.expected_outputs),
                 "interactions": list(validated.interactions),
                 "crisp_dm_stages": list(validated.crisp_dm_stages),
+                "agent4k_role_profile": {
+                    "version_id": validated.agent4k_role_profile_version_id,
+                    "checksum": validated.agent4k_role_profile_checksum,
+                },
             }
             checksum = definition_checksum(definition)
             role_version = ProjectRoleVersion(
@@ -199,6 +212,8 @@ class RoleService:
                     "source_type": "course_project_card",
                     "created_by_user_id": actor.id,
                 },
+                agent4k_role_profile_version_id=validated.agent4k_role_profile_version_id,
+                agent4k_role_profile_checksum=validated.agent4k_role_profile_checksum,
                 checksum=checksum,
             )
             session.add(role_version)

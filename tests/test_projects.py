@@ -14,6 +14,7 @@ def draft(**overrides: object) -> ProjectDraft:
     values: dict[str, object] = {
         "code": "tba 2026",
         "name": "Прогноз спроса",
+        "course_external_id": "tba-2026-mba01",
         "course": "Технологии бизнес-аналитики",
         "cohort": "МБА-01",
         "business_problem": "Нет достоверного прогноза",
@@ -30,6 +31,11 @@ def draft(**overrides: object) -> ProjectDraft:
 def test_project_code_is_normalized() -> None:
     assert normalize_project_code(" tba 2026 ") == "TBA-2026"
     assert validate_project_draft(draft()).code == "TBA-2026"
+
+
+def test_course_external_id_is_required_and_normalized() -> None:
+    result = validate_project_draft(draft(course_external_id=" TBA 2026:MBA01 "))
+    assert result.course_external_id == "tba-2026:mba01"
 
 
 def test_unknown_timezone_is_rejected() -> None:

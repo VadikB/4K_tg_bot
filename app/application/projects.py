@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.models import AuditEvent, Project, ProjectParticipant, User, UserSystemRole
 
 PROJECT_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{2,63}$")
+EXTERNAL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._:-]{2,127}$")
 
 
 class AccessDeniedError(RuntimeError):
@@ -30,6 +31,7 @@ class TelegramIdentity:
 class ProjectDraft:
     code: str
     name: str
+    course_external_id: str
     course: str
     cohort: str | None
     business_problem: str
@@ -44,10 +46,17 @@ def normalize_project_code(value: str) -> str:
     return value.strip().upper().replace(" ", "-")
 
 
+def normalize_external_id(value: str) -> str:
+    return value.strip().lower().replace(" ", "-")
+
+
 def validate_project_draft(draft: ProjectDraft) -> ProjectDraft:
     code = normalize_project_code(draft.code)
     if not PROJECT_CODE_RE.fullmatch(code):
         raise ValueError("Код: 3–64 символа A–Z, 0–9, '-' или '_'.")
+    course_external_id = normalize_external_id(draft.course_external_id)
+    if not EXTERNAL_ID_RE.fullmatch(course_external_id):
+        raise ValueError("ID курса: 3–128 символов a–z, 0–9, '.', ':', '-' или '_'.")
     required = {
         "Название": draft.name,
         "Курс": draft.course,
@@ -69,6 +78,7 @@ def validate_project_draft(draft: ProjectDraft) -> ProjectDraft:
     return ProjectDraft(
         code=code,
         name=draft.name.strip(),
+        course_external_id=course_external_id,
         course=draft.course.strip(),
         cohort=draft.cohort.strip() if draft.cohort and draft.cohort.strip() else None,
         business_problem=draft.business_problem.strip(),
@@ -131,6 +141,7 @@ class ProjectService:
             project = Project(
                 code=validated.code,
                 name=validated.name,
+                course_external_id=validated.course_external_id,
                 course=validated.course,
                 cohort=validated.cohort,
                 business_problem=validated.business_problem,

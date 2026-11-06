@@ -18,6 +18,8 @@ def role_draft(**overrides: object) -> RoleDraft:
         "expected_outputs": ("Описание бизнес-задачи",),
         "interactions": ("Заказчик", "Data Scientist"),
         "crisp_dm_stages": ("business_understanding", "data_understanding"),
+        "agent4k_role_profile_version_id": 17,
+        "agent4k_role_profile_checksum": "a" * 64,
     }
     values.update(overrides)
     return RoleDraft(**values)  # type: ignore[arg-type]
@@ -32,6 +34,13 @@ def test_role_code_and_stages_are_normalized() -> None:
 def test_unknown_crisp_dm_stage_is_rejected() -> None:
     with pytest.raises(ValueError, match="Неизвестные стадии"):
         validate_role_draft(role_draft(crisp_dm_stages=("analysis",)))
+
+
+def test_agent4k_role_mapping_is_required() -> None:
+    with pytest.raises(ValueError, match="опубликованную версию роли"):
+        validate_role_draft(role_draft(agent4k_role_profile_version_id=0))
+    with pytest.raises(ValueError, match="SHA-256"):
+        validate_role_draft(role_draft(agent4k_role_profile_checksum="invalid"))
 
 
 def test_semicolon_items_are_trimmed() -> None:
