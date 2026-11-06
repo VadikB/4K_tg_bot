@@ -79,9 +79,14 @@ class ProjectParticipant(Base, TimestampMixin):
     __tablename__ = "project_participants"
     __table_args__ = (
         UniqueConstraint("project_id", "user_id", name="uq_project_participant"),
+        UniqueConstraint("project_id", "email", name="uq_project_participant_email"),
         CheckConstraint(
             "user_id IS NOT NULL OR status = 'invited'",
             name="ck_project_participant_identity",
+        ),
+        CheckConstraint(
+            "agent4k_user_id IS NOT NULL OR agent4k_linked_at IS NULL",
+            name="ck_project_participant_agent4k_link",
         ),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -90,6 +95,9 @@ class ProjectParticipant(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
     display_name: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(320))
+    agent4k_user_id: Mapped[int | None] = mapped_column(BigInteger)
+    agent4k_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), default="invited")
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

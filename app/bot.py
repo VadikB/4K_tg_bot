@@ -37,6 +37,7 @@ class ProjectWizard(StatesGroup):
 class ParticipantWizard(StatesGroup):
     project_code = State()
     display_name = State()
+    email = State()
 
 
 class RoleWizard(StatesGroup):
@@ -279,6 +280,15 @@ async def participant_project_code(message: Message, state: FSMContext) -> None:
 
 @router.message(ParticipantWizard.display_name, F.text)
 async def participant_display_name(
+    message: Message, state: FSMContext
+) -> None:
+    await state.update_data(display_name=message.text)
+    await state.set_state(ParticipantWizard.email)
+    await message.answer("Введите email участника:")
+
+
+@router.message(ParticipantWizard.email, F.text)
+async def participant_email(
     message: Message, state: FSMContext, participant_service: ParticipantService
 ) -> None:
     data: dict[str, Any] = await state.get_data()
@@ -286,13 +296,14 @@ async def participant_display_name(
         invitation = await participant_service.create_invitation(
             identity_from_message(message),
             project_code=str(data["project_code"]),
-            participant_name=message.text or "",
+            participant_name=str(data["display_name"]),
+            participant_email=message.text or "",
         )
         if message.bot is None:
             raise RuntimeError("Telegram bot context is unavailable")
         link = await create_start_link(message.bot, invitation.token, encode=False)
     except (ValueError, AccessDeniedError) as exc:
-        await message.answer(f"Приглашение не создано: {exc}\nИсправьте имя или /cancel.")
+        await message.answer(f"Приглашение не создано: {exc}\nИсправьте email или /cancel.")
         return
     await state.clear()
     await message.answer(
@@ -321,7 +332,8 @@ async def participants(
         return
     lines = [
         f"{item.display_name} — {item.status}"
-        f" ({'Telegram подключён' if item.telegram_connected else 'ожидает входа'})"
+        f" ({'Telegram подключён' if item.telegram_connected else 'ожидает входа'}; "
+        f"{'email задан' if item.email_configured else 'email не задан'})"
         for item in items
     ]
     await message.answer("\n".join(lines))

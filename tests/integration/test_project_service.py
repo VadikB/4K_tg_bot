@@ -116,6 +116,7 @@ async def test_one_time_invitation_connects_telegram_identity(database_url: str)
         admin,
         project_code="TBA-2026-G01",
         participant_name="Ожидаемый студент",
+        participant_email=" Student@Example.EDU ",
     )
     project = await participants.accept_invitation(student, token=secret.token)
     assert project.code == "TBA-2026-G01"
@@ -130,6 +131,8 @@ async def test_one_time_invitation_connects_telegram_identity(database_url: str)
         assert member is not None and member.user_id == user.id
         assert member.status == "active"
         assert member.display_name == "Студент"
+        assert member.email == "student@example.edu"
+        assert member.agent4k_user_id is None
 
     with pytest.raises(InvitationError, match="уже использовано"):
         await participants.accept_invitation(student, token=secret.token)
@@ -147,6 +150,7 @@ async def test_expired_invitation_is_rejected(database_url: str) -> None:
         admin,
         project_code="TBA-2026-G01",
         participant_name="Студент",
+        participant_email="student@example.edu",
         now=issued_at,
     )
 
@@ -156,6 +160,37 @@ async def test_expired_invitation_is_rejected(database_url: str) -> None:
             token=secret.token,
             now=issued_at + timedelta(hours=2),
         )
+
+
+async def test_participant_email_is_unique_per_project(database_url: str) -> None:
+    factory = session_factory(database_url)
+    projects = ProjectService(factory, bootstrap_admin_ids=(1001,))
+    participants = ParticipantService(factory, invitation_ttl_hours=168)
+    admin = TelegramIdentity(1001, "Преподаватель", "teacher")
+    await projects.ensure_actor(admin)
+    await projects.create_project(admin, sample_draft())
+    await projects.create_project(admin, sample_draft("TBA-2026-G02"))
+
+    await participants.create_invitation(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_name="Студент",
+        participant_email="student@example.edu",
+    )
+    with pytest.raises(ValueError, match="уже добавлен"):
+        await participants.create_invitation(
+            admin,
+            project_code="TBA-2026-G01",
+            participant_name="Дубликат",
+            participant_email="STUDENT@example.edu",
+        )
+    second = await participants.create_invitation(
+        admin,
+        project_code="TBA-2026-G02",
+        participant_name="Тот же студент",
+        participant_email="student@example.edu",
+    )
+    assert second.project_code == "TBA-2026-G02"
 
 
 def sample_role(code: str, name: str) -> RoleDraft:
@@ -180,7 +215,10 @@ async def test_participant_can_have_multiple_versioned_roles(database_url: str) 
     await projects.ensure_actor(admin)
     await projects.create_project(admin, sample_draft())
     invitation = await participants.create_invitation(
-        admin, project_code="TBA-2026-G01", participant_name="Студент"
+        admin,
+        project_code="TBA-2026-G01",
+        participant_name="Студент",
+        participant_email="student@example.edu",
     )
     student = TelegramIdentity(2002, "Студент", "student")
     await participants.accept_invitation(student, token=invitation.token)
@@ -255,7 +293,10 @@ async def assessment_fixture(database_url: str) -> tuple[
     await projects.ensure_actor(admin)
     await projects.create_project(admin, sample_draft())
     invitation = await participants.create_invitation(
-        admin, project_code="TBA-2026-G01", participant_name="Студент"
+        admin,
+        project_code="TBA-2026-G01",
+        participant_name="Студент",
+        participant_email="student@example.edu",
     )
     await participants.accept_invitation(student, token=invitation.token)
     await roles.create_draft(

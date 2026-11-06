@@ -35,6 +35,25 @@ class ParticipantView:
     display_name: str
     status: str
     telegram_connected: bool
+    email_configured: bool
+
+
+def normalize_email(value: str) -> str:
+    email = value.strip().lower()
+    if len(email) > 320 or email.count("@") != 1:
+        raise ValueError("Введите корректный email участника.")
+    local, domain = email.split("@", 1)
+    invalid_domain = (
+        not domain
+        or "." not in domain
+        or domain.startswith(".")
+        or domain.endswith(".")
+    )
+    if not local or invalid_domain:
+        raise ValueError("Введите корректный email участника.")
+    if any(character.isspace() for character in email):
+        raise ValueError("Введите корректный email участника.")
+    return email
 
 
 def invitation_token_hash(token: str) -> str:
@@ -75,11 +94,13 @@ class ParticipantService:
         *,
         project_code: str,
         participant_name: str,
+        participant_email: str,
         now: datetime | None = None,
     ) -> InvitationSecret:
         name = participant_name.strip()
         if not name or len(name) > 255:
             raise ValueError("Имя участника должно содержать от 1 до 255 символов.")
+        email = normalize_email(participant_email)
         current = now or datetime.now(UTC)
         if current.tzinfo is None:
             raise ValueError("now must be timezone-aware")
@@ -93,10 +114,19 @@ class ParticipantService:
             )
             if project is None:
                 raise ValueError("Проект с таким кодом не найден.")
+            existing_email = await session.scalar(
+                select(ProjectParticipant.id).where(
+                    ProjectParticipant.project_id == project.id,
+                    ProjectParticipant.email == email,
+                )
+            )
+            if existing_email is not None:
+                raise ValueError("Участник с таким email уже добавлен в проект.")
             participant = ProjectParticipant(
                 project_id=project.id,
                 user_id=None,
                 display_name=name,
+                email=email,
                 status="invited",
             )
             session.add(participant)
@@ -116,7 +146,7 @@ class ParticipantService:
                     entity_type="project_participant",
                     entity_id=str(participant.id),
                     action="invited",
-                    payload_json={"status": "invited"},
+                    payload_json={"status": "invited", "email_configured": True},
                 )
             )
             return InvitationSecret(participant.id, project.code, token, expires_at)
@@ -212,6 +242,7 @@ class ParticipantService:
                     display_name=item.display_name,
                     status=item.status,
                     telegram_connected=item.user_id is not None,
+                    email_configured=item.email is not None,
                 )
                 for item in rows
             ]
