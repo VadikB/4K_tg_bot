@@ -1,9 +1,13 @@
+import asyncio
 import os
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import func, select
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.application.participants import InvitationError, ParticipantService
@@ -13,8 +17,17 @@ from app.application.projects import (
     ProjectService,
     TelegramIdentity,
 )
+from app.application.roles import RoleDraft, RoleService
 from app.db import session_factory
-from app.models import AuditEvent, Base, Invitation, Project, ProjectParticipant, User
+from app.models import (
+    AuditEvent,
+    Invitation,
+    ParticipantRole,
+    Project,
+    ProjectParticipant,
+    ProjectRoleVersion,
+    User,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -34,12 +47,13 @@ async def database_url() -> str:
     value = isolated_database_url()
     engine = create_async_engine(value)
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.drop_all)
-        await connection.run_sync(Base.metadata.create_all)
-    yield value
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.drop_all)
+        await connection.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        await connection.execute(text("CREATE SCHEMA public"))
     await engine.dispose()
+    config = AlembicConfig("alembic.ini")
+    config.attributes["database_url_override"] = value
+    await asyncio.to_thread(command.upgrade, config, "head")
+    yield value
 
 
 def sample_draft(code: str = "TBA-2026-G01") -> ProjectDraft:
@@ -139,3 +153,87 @@ async def test_expired_invitation_is_rejected(database_url: str) -> None:
             token=secret.token,
             now=issued_at + timedelta(hours=2),
         )
+
+
+def sample_role(code: str, name: str) -> RoleDraft:
+    return RoleDraft(
+        code=code,
+        name=name,
+        mission=f"Миссия: {name}",
+        responsibilities=("Отвечать за результат",),
+        typical_tasks=("Выполнить задачу",),
+        expected_outputs=("Артефакт проекта",),
+        interactions=("Команда проекта",),
+        crisp_dm_stages=("business_understanding", "data_understanding"),
+    )
+
+
+async def test_participant_can_have_multiple_versioned_roles(database_url: str) -> None:
+    factory = session_factory(database_url)
+    projects = ProjectService(factory, bootstrap_admin_ids=(1001,))
+    participants = ParticipantService(factory, invitation_ttl_hours=168)
+    roles = RoleService(factory)
+    admin = TelegramIdentity(1001, "Преподаватель", "teacher")
+    await projects.ensure_actor(admin)
+    await projects.create_project(admin, sample_draft())
+    invitation = await participants.create_invitation(
+        admin, project_code="TBA-2026-G01", participant_name="Студент"
+    )
+    student = TelegramIdentity(2002, "Студент", "student")
+    await participants.accept_invitation(student, token=invitation.token)
+
+    for code, name in (("business_analyst", "Бизнес-аналитик"), ("data_scientist", "DS")):
+        created = await roles.create_draft(
+            admin, project_code="TBA-2026-G01", draft=sample_role(code, name)
+        )
+        assert created.status == "draft"
+        published = await roles.publish(
+            admin, project_code="TBA-2026-G01", role_code=code
+        )
+        assert published.status == "published"
+
+    first = await roles.assign(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_id=invitation.participant_id,
+        role_code="business_analyst",
+    )
+    second = await roles.assign(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_id=invitation.participant_id,
+        role_code="data_scientist",
+    )
+    assert first.is_primary is True
+    assert second.is_primary is False
+    mine = await roles.list_my_roles(student)
+    assert [(item.role_code, item.is_primary) for item in mine] == [
+        ("business_analyst", True),
+        ("data_scientist", False),
+    ]
+
+    async with factory() as session:
+        assigned = list(await session.scalars(select(ParticipantRole)))
+        assert len(assigned) == 2
+        assert sum(item.is_primary for item in assigned) == 1
+
+
+async def test_published_role_content_is_immutable(database_url: str) -> None:
+    factory = session_factory(database_url)
+    projects = ProjectService(factory, bootstrap_admin_ids=(1001,))
+    roles = RoleService(factory)
+    admin = TelegramIdentity(1001, "Преподаватель", "teacher")
+    await projects.ensure_actor(admin)
+    await projects.create_project(admin, sample_draft())
+    await roles.create_draft(
+        admin,
+        project_code="TBA-2026-G01",
+        draft=sample_role("business_analyst", "Бизнес-аналитик"),
+    )
+    await roles.publish(admin, project_code="TBA-2026-G01", role_code="business_analyst")
+
+    with pytest.raises(DBAPIError, match="immutable"):
+        async with factory.begin() as session:
+            version = await session.scalar(select(ProjectRoleVersion))
+            assert version is not None
+            version.definition_json = {"changed": True}

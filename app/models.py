@@ -8,9 +8,11 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -118,6 +120,14 @@ class ProjectRoleVersion(Base, TimestampMixin):
 
 class ParticipantRole(Base):
     __tablename__ = "project_participant_roles"
+    __table_args__ = (
+        Index(
+            "uq_participant_primary_role",
+            "participant_id",
+            unique=True,
+            postgresql_where=text("is_primary"),
+        ),
+    )
     participant_id: Mapped[int] = mapped_column(
         ForeignKey("project_participants.id", ondelete="CASCADE"), primary_key=True
     )

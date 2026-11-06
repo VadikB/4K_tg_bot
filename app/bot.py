@@ -16,6 +16,7 @@ from app.application.projects import (
     ProjectService,
     TelegramIdentity,
 )
+from app.application.roles import RoleDraft, RoleError, RoleService, parse_items
 
 router = Router()
 
@@ -35,6 +36,18 @@ class ProjectWizard(StatesGroup):
 class ParticipantWizard(StatesGroup):
     project_code = State()
     display_name = State()
+
+
+class RoleWizard(StatesGroup):
+    project_code = State()
+    code = State()
+    name = State()
+    mission = State()
+    responsibilities = State()
+    typical_tasks = State()
+    expected_outputs = State()
+    interactions = State()
+    crisp_dm_stages = State()
 
 
 def identity_from_message(message: Message) -> TelegramIdentity:
@@ -88,7 +101,8 @@ async def start(
             "Вы вошли как администратор.\n"
             "/new_project — создать проект\n"
             "/projects — список проектов\n"
-            "/add_participant — пригласить участника"
+            "/add_participant — пригласить участника\n"
+            "/new_role — создать CRISP-DM-роль"
         )
     else:
         await message.answer(
@@ -106,6 +120,11 @@ async def help_command(message: Message) -> None:
         "/new_project — создать проект (администратор)\n"
         "/add_participant — пригласить участника (администратор)\n"
         "/participants CODE — участники проекта (администратор)\n"
+        "/new_role — создать draft роли (администратор)\n"
+        "/publish_role PROJECT ROLE — опубликовать роль\n"
+        "/roles PROJECT — версии ролей\n"
+        "/assign_role PROJECT PARTICIPANT_ID ROLE — назначить роль\n"
+        "/my_roles — мои роли в проектах\n"
         "/progress — прогресс оценки\n"
         "/case — получить или продолжить кейс\n"
         "/cancel — отменить текущий диалог"
@@ -293,17 +312,203 @@ async def participants(
     await message.answer("\n".join(lines))
 
 
+@router.message(Command("new_role"))
+async def new_role(
+    message: Message, state: FSMContext, project_service: ProjectService
+) -> None:
+    _, is_admin = await project_service.ensure_actor(identity_from_message(message))
+    if not is_admin:
+        await message.answer("Создавать роли может только администратор.")
+        return
+    await state.clear()
+    await state.set_state(RoleWizard.project_code)
+    await message.answer("Код проекта для новой роли:")
+
+
+@router.message(RoleWizard.project_code, F.text)
+async def role_project(message: Message, state: FSMContext) -> None:
+    await state.update_data(project_code=message.text)
+    await state.set_state(RoleWizard.code)
+    await message.answer("Машинный код роли, например business_analyst:")
+
+
+@router.message(RoleWizard.code, F.text)
+async def role_code(message: Message, state: FSMContext) -> None:
+    await state.update_data(code=message.text)
+    await state.set_state(RoleWizard.name)
+    await message.answer("Название роли:")
+
+
+@router.message(RoleWizard.name, F.text)
+async def role_name(message: Message, state: FSMContext) -> None:
+    await state.update_data(name=message.text)
+    await state.set_state(RoleWizard.mission)
+    await message.answer("Миссия роли в проекте:")
+
+
+@router.message(RoleWizard.mission, F.text)
+async def role_mission(message: Message, state: FSMContext) -> None:
+    await state.update_data(mission=message.text)
+    await state.set_state(RoleWizard.responsibilities)
+    await message.answer("Зоны ответственности; разделяйте пункты ';':")
+
+
+@router.message(RoleWizard.responsibilities, F.text)
+async def role_responsibilities(message: Message, state: FSMContext) -> None:
+    await state.update_data(responsibilities=message.text or "")
+    await state.set_state(RoleWizard.typical_tasks)
+    await message.answer("Типовые задачи; разделяйте пункты ';':")
+
+
+@router.message(RoleWizard.typical_tasks, F.text)
+async def role_tasks(message: Message, state: FSMContext) -> None:
+    await state.update_data(typical_tasks=message.text or "")
+    await state.set_state(RoleWizard.expected_outputs)
+    await message.answer("Ожидаемые артефакты/результаты; разделяйте пункты ';':")
+
+
+@router.message(RoleWizard.expected_outputs, F.text)
+async def role_outputs(message: Message, state: FSMContext) -> None:
+    await state.update_data(expected_outputs=message.text or "")
+    await state.set_state(RoleWizard.interactions)
+    await message.answer("Рабочие взаимодействия; разделяйте пункты ';':")
+
+
+@router.message(RoleWizard.interactions, F.text)
+async def role_interactions(message: Message, state: FSMContext) -> None:
+    await state.update_data(interactions=message.text or "")
+    await state.set_state(RoleWizard.crisp_dm_stages)
+    await message.answer(
+        "Стадии CRISP-DM через ';': business_understanding; data_understanding; "
+        "data_preparation; modeling; evaluation; deployment"
+    )
+
+
+@router.message(RoleWizard.crisp_dm_stages, F.text)
+async def role_stages(
+    message: Message, state: FSMContext, role_service: RoleService
+) -> None:
+    data: dict[str, Any] = await state.get_data()
+    try:
+        project_code = str(data.pop("project_code"))
+        draft = RoleDraft(
+            code=str(data["code"]),
+            name=str(data["name"]),
+            mission=str(data["mission"]),
+            responsibilities=parse_items(str(data["responsibilities"])),
+            typical_tasks=parse_items(str(data["typical_tasks"])),
+            expected_outputs=parse_items(str(data["expected_outputs"])),
+            interactions=parse_items(str(data["interactions"])),
+            crisp_dm_stages=parse_items(message.text or ""),
+        )
+        result = await role_service.create_draft(
+            identity_from_message(message), project_code=project_code, draft=draft
+        )
+    except (ValueError, RoleError, AccessDeniedError) as exc:
+        await message.answer(f"Роль не создана: {exc}\nИсправьте стадии или /cancel.")
+        return
+    await state.clear()
+    await message.answer(
+        f"Draft роли создан: {result.code} v{result.version}.\n"
+        f"Checksum: {result.checksum}\n"
+        f"Опубликовать: /publish_role {project_code} {result.code}"
+    )
+
+
+@router.message(Command("publish_role"))
+async def publish_role(
+    message: Message, command: CommandObject, role_service: RoleService
+) -> None:
+    parts = (command.args or "").split()
+    if len(parts) != 2:
+        await message.answer("Формат: /publish_role PROJECT_CODE ROLE_CODE")
+        return
+    try:
+        result = await role_service.publish(
+            identity_from_message(message), project_code=parts[0], role_code=parts[1]
+        )
+    except (RoleError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    await message.answer(f"Роль {result.code} v{result.version} опубликована.")
+
+
+@router.message(Command("roles"))
+async def roles(
+    message: Message, command: CommandObject, role_service: RoleService
+) -> None:
+    if not command.args:
+        await message.answer("Формат: /roles PROJECT_CODE")
+        return
+    try:
+        items = await role_service.list_roles(
+            identity_from_message(message), project_code=command.args
+        )
+    except (RoleError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    if not items:
+        await message.answer("У проекта пока нет ролей.")
+        return
+    await message.answer(
+        "\n".join(f"{item.code} v{item.version} — {item.status}" for item in items)
+    )
+
+
+@router.message(Command("assign_role"))
+async def assign_role(
+    message: Message, command: CommandObject, role_service: RoleService
+) -> None:
+    parts = (command.args or "").split()
+    if len(parts) != 3 or not parts[1].isdigit():
+        await message.answer("Формат: /assign_role PROJECT_CODE PARTICIPANT_ID ROLE_CODE")
+        return
+    try:
+        result = await role_service.assign(
+            identity_from_message(message),
+            project_code=parts[0],
+            participant_id=int(parts[1]),
+            role_code=parts[2],
+        )
+    except (RoleError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    suffix = "основная" if result.is_primary else "дополнительная"
+    action = "назначена" if result.created else "уже была назначена"
+    await message.answer(
+        f"Роль {result.role_code} v{result.role_version} {action}; {suffix}."
+    )
+
+
+@router.message(Command("my_roles"))
+async def my_roles(message: Message, role_service: RoleService) -> None:
+    items = await role_service.list_my_roles(identity_from_message(message))
+    if not items:
+        await message.answer("Вам пока не назначены проектные роли.")
+        return
+    await message.answer(
+        "\n".join(
+            f"{item.project_code}: {item.role_name} v{item.role_version}"
+            f" ({'основная' if item.is_primary else 'дополнительная'})"
+            for item in items
+        )
+    )
+
+
 @router.message(Command("progress", "case"))
 async def not_connected_yet(message: Message) -> None:
     await message.answer("Функция станет доступна после подключения проекта администратором.")
 
 
 def build_dispatcher(
-    project_service: ProjectService, participant_service: ParticipantService
+    project_service: ProjectService,
+    participant_service: ParticipantService,
+    role_service: RoleService,
 ) -> Dispatcher:
     dispatcher = Dispatcher(
         project_service=project_service,
         participant_service=participant_service,
+        role_service=role_service,
     )
     dispatcher.include_router(router)
     return dispatcher

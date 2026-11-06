@@ -10,7 +10,8 @@ from app.models import Base
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
-config.set_main_option("sqlalchemy.url", Settings().database_url)
+database_url_override = config.attributes.get("database_url_override")
+config.set_main_option("sqlalchemy.url", database_url_override or Settings().database_url)
 target_metadata = Base.metadata
 
 
