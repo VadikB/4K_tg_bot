@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from datetime import UTC, date, datetime, timedelta
 
@@ -27,6 +28,7 @@ from app.models import (
     Invitation,
     ParticipantRole,
     Project,
+    ProjectAssessmentContextSnapshot,
     ProjectAssessmentSpec,
     ProjectParticipant,
     ProjectRoleVersion,
@@ -444,6 +446,55 @@ async def test_published_spec_assigns_exact_role_and_exposes_progress(
         stored = await session.scalar(select(AssessmentAssignment))
         assert stored is not None
         assert stored.external_cycle_id is None
+
+
+async def test_publishes_immutable_context_without_contact_identity(
+    database_url: str,
+) -> None:
+    assessments, admin, _, participant_id = await assessment_fixture(database_url)
+    await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01", draft=sample_spec()
+    )
+    await assessments.publish_spec(admin, project_code="TBA-2026-G01")
+    assignment = await assessments.assign(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_id=participant_id,
+        role_code="business_analyst",
+    )
+    factory = session_factory(database_url)
+    async with factory.begin() as session:
+        participant = await session.get(ProjectParticipant, participant_id)
+        assert participant is not None
+        participant.agent4k_user_id = 42001
+        participant.agent4k_linked_at = datetime.now(UTC)
+
+    published = await assessments.publish_context_snapshot(
+        admin, assignment_id=assignment.id
+    )
+    repeated = await assessments.publish_context_snapshot(admin, assignment_id=assignment.id)
+    assert repeated == published
+    assert published.assignment_ref == f"edu:4k-tg-bot:p1:a{assignment.id}"
+
+    async with factory() as session:
+        stored = await session.scalar(select(ProjectAssessmentContextSnapshot))
+        assert stored is not None
+        assert stored.snapshot_json["participant"] == {
+            "local_ref": f"participant:{participant_id}",
+            "agent4k_user_id": 42001,
+        }
+        serialized = json.dumps(stored.snapshot_json, ensure_ascii=False).lower()
+        assert "email" not in serialized
+        assert "telegram" not in serialized
+        assert "student@example.edu" not in serialized
+        assert stored.snapshot_json["role"]["agent4k_role_profile_version_id"] == 17
+        assert stored.snapshot_json["assessment_spec"]["version"] == 1
+
+    with pytest.raises(DBAPIError, match="immutable"):
+        async with factory.begin() as session:
+            stored = await session.scalar(select(ProjectAssessmentContextSnapshot))
+            assert stored is not None
+            stored.snapshot_json = {"changed": True}
 
 
 async def test_assessment_rejects_role_not_assigned_to_participant(database_url: str) -> None:

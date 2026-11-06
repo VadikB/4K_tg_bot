@@ -14,10 +14,12 @@ from app.models import (
     CaseDelivery,
     ParticipantRole,
     Project,
+    ProjectAssessmentContextSnapshot,
     ProjectAssessmentSpec,
     ProjectParticipant,
     ProjectRole,
     ProjectRoleVersion,
+    ProjectStage,
     User,
     UserSystemRole,
 )
@@ -64,6 +66,15 @@ class AssessmentAssignmentView:
     remaining_cases: int
     has_active_case: bool
     runtime_connected: bool
+
+
+@dataclass(frozen=True)
+class AssessmentContextSnapshotView:
+    id: int
+    assignment_id: int
+    assignment_ref: str
+    status: str
+    checksum: str
 
 
 def validate_spec_draft(draft: AssessmentSpecDraft) -> AssessmentSpecDraft:
@@ -331,6 +342,167 @@ class AssessmentService:
                 assignment.id, project.code, role.code, role_version.version, spec.version,
                 assignment.status, spec.required_case_count, 0, spec.required_case_count,
                 False, assignment.external_cycle_id is not None,
+            )
+
+    async def publish_context_snapshot(
+        self, identity: TelegramIdentity, *, assignment_id: int
+    ) -> AssessmentContextSnapshotView:
+        async with self._session_factory.begin() as session:
+            actor = await _require_admin(session, identity)
+            assignment = await session.scalar(
+                select(AssessmentAssignment)
+                .where(AssessmentAssignment.id == assignment_id)
+                .with_for_update()
+            )
+            if assignment is None:
+                raise AssessmentError("Назначение оценки не найдено.")
+            existing = await session.scalar(
+                select(ProjectAssessmentContextSnapshot).where(
+                    ProjectAssessmentContextSnapshot.assessment_assignment_id
+                    == assignment.id
+                )
+            )
+            if existing is not None:
+                if definition_checksum(dict(existing.snapshot_json)) != existing.checksum:
+                    raise AssessmentError("Checksum snapshot контекста не совпадает.")
+                return AssessmentContextSnapshotView(
+                    existing.id,
+                    assignment.id,
+                    existing.assignment_ref,
+                    existing.status,
+                    existing.checksum,
+                )
+            if assignment.status not in {"assigned", "active"}:
+                raise AssessmentError(
+                    "Контекст можно опубликовать только для активного назначения."
+                )
+
+            participant = await session.get(ProjectParticipant, assignment.participant_id)
+            spec = await session.get(
+                ProjectAssessmentSpec, assignment.project_assessment_spec_id
+            )
+            role_version = await session.get(
+                ProjectRoleVersion, assignment.project_role_version_id
+            )
+            if participant is None or spec is None or role_version is None:
+                raise AssessmentError("Контекст назначения неполон.")
+            project = await session.get(Project, participant.project_id)
+            role = await session.get(ProjectRole, role_version.project_role_id)
+            if project is None or role is None or spec.project_id != project.id:
+                raise AssessmentError("Контекст назначения противоречив.")
+            if participant.agent4k_user_id is None:
+                raise AssessmentError("Участник ещё не связан с пользователем 4К.")
+            if not project.course_external_id:
+                raise AssessmentError("У проекта отсутствует идентификатор курса.")
+            if spec.status != "published":
+                raise AssessmentError("Спецификация оценки не опубликована.")
+            if role_version.status != "published":
+                raise AssessmentError("Версия проектной роли не опубликована.")
+            if (
+                role_version.agent4k_role_profile_version_id is None
+                or role_version.agent4k_role_profile_checksum is None
+            ):
+                raise AssessmentError("Проектная роль не связана с RoleProfileVersion 4К.")
+
+            stages = list(
+                await session.scalars(
+                    select(ProjectStage)
+                    .where(ProjectStage.project_id == project.id)
+                    .order_by(ProjectStage.id)
+                )
+            )
+            assignment_ref = f"edu:4k-tg-bot:p{project.id}:a{assignment.id}"
+            snapshot = {
+                "schema_version": 1,
+                "kind": "educational_project_assessment_context",
+                "assignment_ref": assignment_ref,
+                "course": {
+                    "external_id": project.course_external_id,
+                    "name": project.course,
+                    "cohort": project.cohort,
+                },
+                "project": {
+                    "local_ref": f"project:{project.id}",
+                    "code": project.code,
+                    "name": project.name,
+                    "business_problem": project.business_problem,
+                    "expected_result": project.expected_result,
+                    "description": project.description,
+                    "timezone": project.timezone,
+                    "stages": [
+                        {
+                            "stage": stage.stage,
+                            "description": stage.description,
+                            "expected_artifacts": list(stage.expected_artifacts_json),
+                            "status": stage.status,
+                        }
+                        for stage in stages
+                    ],
+                },
+                "participant": {
+                    "local_ref": f"participant:{participant.id}",
+                    "agent4k_user_id": participant.agent4k_user_id,
+                },
+                "role": {
+                    "code": role.code,
+                    "name": role.name,
+                    "project_role_version": role_version.version,
+                    "project_role_checksum": role_version.checksum,
+                    "definition": dict(role_version.definition_json),
+                    "agent4k_role_profile_version_id": (
+                        role_version.agent4k_role_profile_version_id
+                    ),
+                    "agent4k_role_profile_checksum": (
+                        role_version.agent4k_role_profile_checksum
+                    ),
+                },
+                "assessment_spec": {
+                    "version": spec.version,
+                    "checksum": spec.checksum,
+                    "assessment_configuration_ref": spec.assessment_configuration_ref,
+                    "assessment_configuration_checksum": (
+                        spec.assessment_configuration_checksum
+                    ),
+                    "methodology_ref": spec.methodology_ref,
+                    "required_case_count": spec.required_case_count,
+                    "daily_case_limit": spec.daily_case_limit,
+                    "timezone": spec.timezone,
+                    "available_from": (
+                        spec.available_from.isoformat() if spec.available_from else None
+                    ),
+                    "available_until": (
+                        spec.available_until.isoformat() if spec.available_until else None
+                    ),
+                    "result_recipient_policy": spec.result_recipient_policy,
+                },
+            }
+            checksum = definition_checksum(snapshot)
+            context = ProjectAssessmentContextSnapshot(
+                assessment_assignment_id=assignment.id,
+                assignment_ref=assignment_ref,
+                status="published",
+                snapshot_json=snapshot,
+                checksum=checksum,
+                published_by_user_id=actor.id,
+            )
+            session.add(context)
+            await session.flush()
+            session.add(
+                AuditEvent(
+                    actor_user_id=actor.id,
+                    project_id=project.id,
+                    entity_type="project_assessment_context_snapshot",
+                    entity_id=str(context.id),
+                    action="published",
+                    payload_json={
+                        "assignment_id": assignment.id,
+                        "assignment_ref": assignment_ref,
+                        "checksum": checksum,
+                    },
+                )
+            )
+            return AssessmentContextSnapshotView(
+                context.id, assignment.id, assignment_ref, context.status, checksum
             )
 
     async def my_progress(self, identity: TelegramIdentity) -> list[AssessmentAssignmentView]:

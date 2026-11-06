@@ -213,6 +213,28 @@ class AssessmentAssignment(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ProjectAssessmentContextSnapshot(Base):
+    __tablename__ = "project_assessment_context_snapshots"
+    __table_args__ = (
+        UniqueConstraint("assessment_assignment_id", name="uq_context_snapshot_assignment"),
+        CheckConstraint("status = 'published'", name="ck_context_snapshot_status"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    assessment_assignment_id: Mapped[int] = mapped_column(
+        ForeignKey("assessment_assignments.id", ondelete="RESTRICT")
+    )
+    assignment_ref: Mapped[str] = mapped_column(String(200), unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="published")
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    checksum: Mapped[str] = mapped_column(String(64))
+    published_by_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class CaseDelivery(Base, TimestampMixin):
     __tablename__ = "case_deliveries"
     __table_args__ = (

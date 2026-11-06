@@ -49,6 +49,7 @@ python -m app.main
 /publish_spec PROJECT  опубликовать локальный snapshot
 /specs PROJECT  версии спецификации
 /assign_assessment PROJECT PARTICIPANT_ID ROLE  назначить оценку
+/publish_context ASSIGNMENT_ID  опубликовать неизменяемый контекст назначения
 /progress     прогресс участника
 /cancel       отмена текущего диалога
 ```
@@ -73,6 +74,12 @@ Bootstrap не делает все новые аккаунты админист�
 означает неизменяемость локального snapshot, но не runtime-допуск: до проверки через
 API 4К snapshot содержит `runtime_admission=pending_agent4k_verification`, а назначение
 не получает `external_cycle_id`.
+
+После назначения команда `/publish_context ASSIGNMENT_ID` фиксирует отдельный
+неизменяемый snapshot: курс и поток, учебный проект и этапы CRISP-DM, точную версию
+проектной роли и `RoleProfileVersion` 4К, спецификацию оценки и технический
+`agent4k_user_id`. Email, Telegram ID и отображаемое имя участника в snapshot не входят.
+Стабильный `assignment_ref` предназначен для последующего создания контекста и Cycle в 4К.
 
 При принятии приглашения бот вызывает
 `POST /integration/v1/participants/resolve` и сохраняет полученный внутренний ID 4К.

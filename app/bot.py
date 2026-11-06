@@ -156,6 +156,7 @@ async def help_command(message: Message) -> None:
         "/publish_spec PROJECT — опубликовать спецификацию\n"
         "/specs PROJECT — версии спецификации\n"
         "/assign_assessment PROJECT PARTICIPANT_ID ROLE — назначить оценку\n"
+        "/publish_context ASSIGNMENT_ID — зафиксировать контекст назначения\n"
         "/progress — прогресс оценки\n"
         "/case — получить или продолжить кейс\n"
         "/cancel — отменить текущий диалог"
@@ -759,7 +760,29 @@ async def assign_assessment(
     await message.answer(
         f"Оценка назначена: {result.project_code}, роль {result.role_code} "
         f"v{result.role_version}, спецификация v{result.spec_version}.\n"
-        "Cycle 4К ещё не создан."
+        "Cycle 4К ещё не создан.\n"
+        f"Зафиксировать контекст: /publish_context {result.id}"
+    )
+
+
+@router.message(Command("publish_context"))
+async def publish_context(
+    message: Message, command: CommandObject, assessment_service: AssessmentService
+) -> None:
+    if not command.args or not command.args.strip().isdigit():
+        await message.answer("Формат: /publish_context ASSIGNMENT_ID")
+        return
+    try:
+        result = await assessment_service.publish_context_snapshot(
+            identity_from_message(message), assignment_id=int(command.args.strip())
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    await message.answer(
+        "Контекст назначения опубликован неизменяемо.\n"
+        f"Assignment ref: {result.assignment_ref}\n"
+        f"Checksum: {result.checksum}"
     )
 
 
