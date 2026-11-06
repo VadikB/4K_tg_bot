@@ -51,6 +51,8 @@ python -m app.main
 /assign_assessment PROJECT PARTICIPANT_ID ROLE  назначить оценку
 /publish_context ASSIGNMENT_ID  опубликовать неизменяемый контекст назначения
 /prepare_cycle ASSIGNMENT_ID  зарегистрировать контекст в 4К и проверить admission
+/admission_programs ASSIGNMENT_ID  показать совместимые опубликованные программы
+/connect_program ASSIGNMENT_ID PROGRAM_ID  явно подключить выбранную программу
 /progress     прогресс участника
 /cancel       отмена текущего диалога
 ```
@@ -86,6 +88,10 @@ questionnaire, AssessmentProgram и PersonalizedProfile не допущены, �
 `awaiting_admission` и показывает точные причины; `external_cycle_id` не создаётся.
 После выполнения admission та же команда получает `preparing`, а при завершении
 канонической очереди 4К — `prepared` и сохраняет реальный `external_cycle_id`.
+Причину `PROGRAM_NOT_CONNECTED` преподаватель может закрыть явным выбором из
+`/admission_programs`; бот показывает только программы с тем же `assignment_ref` и
+разрешённой RoleProfileVersion. Questionnaire и PersonalizedProfile продолжают
+подтверждаться в своих предметных сценариях 4К.
 
 При принятии приглашения бот вызывает
 `POST /integration/v1/participants/resolve` и сохраняет полученный внутренний ID 4К.

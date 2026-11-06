@@ -158,6 +158,8 @@ async def help_command(message: Message) -> None:
         "/assign_assessment PROJECT PARTICIPANT_ID ROLE — назначить оценку\n"
         "/publish_context ASSIGNMENT_ID — зафиксировать контекст назначения\n"
         "/prepare_cycle ASSIGNMENT_ID — проверить admission и подготовку Cycle\n"
+        "/admission_programs ASSIGNMENT_ID — совместимые программы 4К\n"
+        "/connect_program ASSIGNMENT_ID PROGRAM_ID — подключить программу\n"
         "/progress — прогресс оценки\n"
         "/case — получить или продолжить кейс\n"
         "/cancel — отменить текущий диалог"
@@ -834,10 +836,86 @@ async def prepare_cycle(
             "Повторите команду позже для проверки результата."
         )
         return
-    reasons = "\n".join(f"• {reason}" for reason in result.reasons)
+    instructions = {
+        "PROGRAM_NOT_CONNECTED": (
+            f"выберите программу: /admission_programs {result.assignment_id}"
+        ),
+        "QUESTIONNAIRE_NOT_CONFIRMED": "подтвердите анкету проекта в 4К",
+        "PERSONALIZED_PROFILE_NOT_CONFIRMED": (
+            "участнику нужно подтвердить профиль после назначения программы"
+        ),
+        "ASSIGNMENT_NOT_ACTIVE": "создайте active assignment в админке 4К",
+        "CYCLE_PREPARATION_FAILED": "проверьте admission и повторите подготовку",
+    }
+    reasons = "\n".join(
+        f"• {reason}: {instructions.get(reason, 'проверьте настройку в 4К')}"
+        for reason in result.reasons
+    )
     await message.answer(
         "Контекст зарегистрирован в 4К и ожидает admission.\n"
         f"Operation: {result.operation_id}\nПричины:\n{reasons or 'не указаны'}"
+    )
+
+
+@router.message(Command("admission_programs"))
+async def admission_programs(
+    message: Message,
+    command: CommandObject,
+    assessment_service: AssessmentService,
+    agent4k_adapter: Agent4KPort,
+) -> None:
+    if not command.args or not command.args.strip().isdigit():
+        await message.answer("Формат: /admission_programs ASSIGNMENT_ID")
+        return
+    try:
+        programs = await assessment_service.list_compatible_programs(
+            identity_from_message(message),
+            assignment_id=int(command.args.strip()),
+            adapter=agent4k_adapter,
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    if not programs:
+        await message.answer(
+            "Совместимых опубликованных программ нет. "
+            "Нужна публикация AssessmentProgram с тем же assignment_ref и ролью."
+        )
+        return
+    await message.answer(
+        "Совместимые программы:\n"
+        + "\n".join(
+            f"{item.id}: {item.name} ({item.code} v{item.version})"
+            for item in programs
+        )
+        + "\n\nПодключение: /connect_program ASSIGNMENT_ID PROGRAM_ID"
+    )
+
+
+@router.message(Command("connect_program"))
+async def connect_program(
+    message: Message,
+    command: CommandObject,
+    assessment_service: AssessmentService,
+    agent4k_adapter: Agent4KPort,
+) -> None:
+    parts = (command.args or "").split()
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        await message.answer("Формат: /connect_program ASSIGNMENT_ID PROGRAM_ID")
+        return
+    try:
+        connected = await assessment_service.connect_compatible_program(
+            identity_from_message(message),
+            assignment_id=int(parts[0]),
+            program_definition_id=int(parts[1]),
+            adapter=agent4k_adapter,
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    await message.answer(
+        f"Программа {connected.program_code} v{connected.program_version} подключена.\n"
+        f"Повторите: /prepare_cycle {parts[0]}"
     )
 
 

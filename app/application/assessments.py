@@ -8,7 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.projects import AccessDeniedError, TelegramIdentity, normalize_project_code
 from app.application.roles import definition_checksum
-from app.integrations.agent4k import Agent4KPort, Agent4KUnavailableError
+from app.integrations.agent4k import (
+    Agent4KPort,
+    Agent4KUnavailableError,
+    EducationalProgramConnection,
+    EducationalProgramOption,
+)
 from app.models import (
     AssessmentAssignment,
     AssessmentContextPreparation,
@@ -612,6 +617,75 @@ class AssessmentService:
             external.reasons,
             external.cycle_id,
         )
+
+    async def list_compatible_programs(
+        self, identity: TelegramIdentity, *, assignment_id: int, adapter: Agent4KPort
+    ) -> tuple[EducationalProgramOption, ...]:
+        async with self._session_factory() as session:
+            await _require_admin(session, identity)
+            context = await session.scalar(
+                select(ProjectAssessmentContextSnapshot).where(
+                    ProjectAssessmentContextSnapshot.assessment_assignment_id
+                    == assignment_id
+                )
+            )
+            if context is None:
+                raise AssessmentError("Сначала опубликуйте контекст назначения.")
+            assignment_ref = context.assignment_ref
+        try:
+            return await adapter.list_educational_programs(
+                assignment_ref=assignment_ref
+            )
+        except Agent4KUnavailableError as exc:
+            raise AssessmentError("4К недоступен; запрос можно повторить позже.") from exc
+
+    async def connect_compatible_program(
+        self,
+        identity: TelegramIdentity,
+        *,
+        assignment_id: int,
+        program_definition_id: int,
+        adapter: Agent4KPort,
+    ) -> EducationalProgramConnection:
+        async with self._session_factory() as session:
+            actor = await _require_admin(session, identity)
+            context = await session.scalar(
+                select(ProjectAssessmentContextSnapshot).where(
+                    ProjectAssessmentContextSnapshot.assessment_assignment_id
+                    == assignment_id
+                )
+            )
+            if context is None:
+                raise AssessmentError("Сначала опубликуйте контекст назначения.")
+            assignment_ref = context.assignment_ref
+            context_id = context.id
+            operation_id = f"tg-connect-program:{context_id}:{program_definition_id}"
+            actor_id = actor.id
+        try:
+            connected = await adapter.connect_educational_program(
+                assignment_ref=assignment_ref,
+                program_definition_id=program_definition_id,
+                operation_id=operation_id,
+            )
+        except Agent4KUnavailableError as exc:
+            raise AssessmentError("Программа несовместима или 4К недоступен.") from exc
+        async with self._session_factory.begin() as session:
+            await _require_admin(session, identity)
+            session.add(
+                AuditEvent(
+                    actor_user_id=actor_id,
+                    project_id=None,
+                    entity_type="assessment_program_connection",
+                    entity_id=str(context_id),
+                    action="connected",
+                    payload_json={
+                        "assignment_id": assignment_id,
+                        "program_definition_id": connected.program_definition_id,
+                        "operation_id": operation_id,
+                    },
+                )
+            )
+        return connected
 
     async def my_progress(self, identity: TelegramIdentity) -> list[AssessmentAssignmentView]:
         async with self._session_factory() as session:

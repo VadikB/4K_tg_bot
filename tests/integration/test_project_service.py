@@ -23,6 +23,8 @@ from app.application.roles import RoleDraft, RoleService
 from app.db import session_factory
 from app.integrations.agent4k import (
     EducationalContextPreparation,
+    EducationalProgramConnection,
+    EducationalProgramOption,
     ParticipantIdentityLink,
     PublishedRoleProfileReference,
 )
@@ -67,6 +69,27 @@ class PublishedRoleAdapter:
             assignment_ref=str(snapshot["assignment_ref"]),
             reasons=("PROGRAM_NOT_CONNECTED",),
             cycle_id=None,
+        )
+
+    async def list_educational_programs(self, *, assignment_ref: str):
+        return (
+            EducationalProgramOption(
+                id=55,
+                code="student-4k",
+                version="1.0",
+                name="Студенческая оценка",
+                checksum="c" * 64,
+            ),
+        )
+
+    async def connect_educational_program(
+        self, *, assignment_ref: str, program_definition_id: int, operation_id: str
+    ):
+        return EducationalProgramConnection(
+            program_definition_id=program_definition_id,
+            program_code="student-4k",
+            program_version="1.0",
+            status="connected",
         )
 
 
@@ -510,6 +533,17 @@ async def test_publishes_immutable_context_without_contact_identity(
     )
     assert preparation.status == "awaiting_admission"
     assert preparation.reasons == ("PROGRAM_NOT_CONNECTED",)
+    programs = await assessments.list_compatible_programs(
+        admin, assignment_id=assignment.id, adapter=PublishedRoleAdapter()
+    )
+    assert programs[0].id == 55
+    connected = await assessments.connect_compatible_program(
+        admin,
+        assignment_id=assignment.id,
+        program_definition_id=55,
+        adapter=PublishedRoleAdapter(),
+    )
+    assert connected.program_code == "student-4k"
 
     with pytest.raises(DBAPIError, match="immutable"):
         async with factory.begin() as session:

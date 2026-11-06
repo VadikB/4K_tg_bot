@@ -42,6 +42,23 @@ class EducationalContextPreparation:
     cycle_id: str | None
 
 
+@dataclass(frozen=True)
+class EducationalProgramOption:
+    id: int
+    code: str
+    version: str
+    name: str
+    checksum: str
+
+
+@dataclass(frozen=True)
+class EducationalProgramConnection:
+    program_definition_id: int
+    program_code: str
+    program_version: str
+    status: str
+
+
 class Agent4KPort(Protocol):
     async def resolve_participant(
         self, *, email: str, display_name: str
@@ -54,6 +71,14 @@ class Agent4KPort(Protocol):
     async def prepare_educational_context(
         self, *, snapshot: dict[str, object], checksum: str
     ) -> EducationalContextPreparation: ...
+
+    async def list_educational_programs(
+        self, *, assignment_ref: str
+    ) -> tuple[EducationalProgramOption, ...]: ...
+
+    async def connect_educational_program(
+        self, *, assignment_ref: str, program_definition_id: int, operation_id: str
+    ) -> EducationalProgramConnection: ...
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope: ...
 
@@ -75,6 +100,18 @@ class DisabledAgent4KAdapter:
         self, *, snapshot: dict[str, object], checksum: str
     ) -> EducationalContextPreparation:
         del snapshot, checksum
+        raise Agent4KUnavailableError("Agent4K integration is disabled")
+
+    async def list_educational_programs(
+        self, *, assignment_ref: str
+    ) -> tuple[EducationalProgramOption, ...]:
+        del assignment_ref
+        raise Agent4KUnavailableError("Agent4K integration is disabled")
+
+    async def connect_educational_program(
+        self, *, assignment_ref: str, program_definition_id: int, operation_id: str
+    ) -> EducationalProgramConnection:
+        del assignment_ref, program_definition_id, operation_id
         raise Agent4KUnavailableError("Agent4K integration is disabled")
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope:
@@ -174,6 +211,51 @@ class HttpAgent4KAdapter:
             raise Agent4KUnavailableError(
                 "Agent4K educational context request failed"
             ) from exc
+
+    async def list_educational_programs(
+        self, *, assignment_ref: str
+    ) -> tuple[EducationalProgramOption, ...]:
+        try:
+            response = await self._client.post(
+                "/integration/v1/educational-contexts/program-options",
+                json={"assignment_ref": assignment_ref},
+            )
+            response.raise_for_status()
+            return tuple(
+                EducationalProgramOption(
+                    id=int(item["id"]),
+                    code=str(item["code"]),
+                    version=str(item["version"]),
+                    name=str(item["name"]),
+                    checksum=str(item["definition_checksum"]),
+                )
+                for item in response.json()
+            )
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise Agent4KUnavailableError("Agent4K program options request failed") from exc
+
+    async def connect_educational_program(
+        self, *, assignment_ref: str, program_definition_id: int, operation_id: str
+    ) -> EducationalProgramConnection:
+        try:
+            response = await self._client.post(
+                "/integration/v1/educational-contexts/connect-program",
+                json={
+                    "assignment_ref": assignment_ref,
+                    "program_definition_id": program_definition_id,
+                    "operation_id": operation_id,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return EducationalProgramConnection(
+                program_definition_id=int(payload["program_definition_id"]),
+                program_code=str(payload["program_code"]),
+                program_version=str(payload["program_version"]),
+                status=str(payload["status"]),
+            )
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise Agent4KUnavailableError("Agent4K program connection request failed") from exc
 
     async def close(self) -> None:
         await self._client.aclose()

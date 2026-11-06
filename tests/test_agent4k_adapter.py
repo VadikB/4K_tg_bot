@@ -102,3 +102,47 @@ async def test_http_adapter_prepares_educational_context() -> None:
     assert result.status == "awaiting_admission"
     assert result.reasons == ("PROGRAM_NOT_CONNECTED",)
 
+
+async def test_http_adapter_lists_and_connects_educational_program() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if request.url.path.endswith("program-options"):
+            assert payload == {"assignment_ref": "edu:4k-tg-bot:p1:a2"}
+            return httpx.Response(200, json=[{
+                "id": 55,
+                "code": "student-4k",
+                "version": "1.0",
+                "name": "Студенческая оценка",
+                "assignment_ref": "edu:4k-tg-bot:p1:a2",
+                "definition_checksum": "c" * 64,
+            }])
+        assert request.url.path.endswith("connect-program")
+        assert payload["program_definition_id"] == 55
+        return httpx.Response(200, json={
+            "assignment_ref": "edu:4k-tg-bot:p1:a2",
+            "organization_id": 4,
+            "program_definition_id": 55,
+            "program_code": "student-4k",
+            "program_version": "1.0",
+            "status": "connected",
+        })
+
+    adapter = HttpAgent4KAdapter(
+        base_url="https://agent4k.example",
+        token="private-service-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        options = await adapter.list_educational_programs(
+            assignment_ref="edu:4k-tg-bot:p1:a2"
+        )
+        connected = await adapter.connect_educational_program(
+            assignment_ref="edu:4k-tg-bot:p1:a2",
+            program_definition_id=55,
+            operation_id="tg-connect-program:7:55",
+        )
+    finally:
+        await adapter.close()
+    assert options[0].id == 55
+    assert connected.status == "connected"
+
