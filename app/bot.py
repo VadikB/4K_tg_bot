@@ -827,6 +827,13 @@ async def prepare_cycle(
     if result.status == "prepared":
         await message.answer(f"Cycle 4К подготовлен: {result.cycle_id}")
         return
+    if result.status == "preparing":
+        await message.answer(
+            "Admission выполнен. Подготовка Cycle поставлена в очередь 4К.\n"
+            f"Operation: {result.operation_id}\n"
+            "Повторите команду позже для проверки результата."
+        )
+        return
     reasons = "\n".join(f"• {reason}" for reason in result.reasons)
     await message.answer(
         "Контекст зарегистрирован в 4К и ожидает admission.\n"

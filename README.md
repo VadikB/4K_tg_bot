@@ -84,6 +84,8 @@ API 4К snapshot содержит `runtime_admission=pending_agent4k_verificatio
 Команда `/prepare_cycle ASSIGNMENT_ID` передаёт snapshot в 4К. Пока обязательные
 questionnaire, AssessmentProgram и PersonalizedProfile не допущены, бот сохраняет
 `awaiting_admission` и показывает точные причины; `external_cycle_id` не создаётся.
+После выполнения admission та же команда получает `preparing`, а при завершении
+канонической очереди 4К — `prepared` и сохраняет реальный `external_cycle_id`.
 
 При принятии приглашения бот вызывает
 `POST /integration/v1/participants/resolve` и сохраняет полученный внутренний ID 4К.
