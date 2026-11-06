@@ -42,6 +42,11 @@ python -m app.main
 /roles PROJECT  версии ролей проекта
 /assign_role PROJECT PARTICIPANT_ID ROLE  назначить роль
 /my_roles     роли текущего участника
+/new_spec     создать draft спецификации оценки
+/publish_spec PROJECT  опубликовать локальный snapshot
+/specs PROJECT  версии спецификации
+/assign_assessment PROJECT PARTICIPANT_ID ROLE  назначить оценку
+/progress     прогресс участника
 /cancel       отмена текущего диалога
 ```
 
@@ -55,6 +60,12 @@ Bootstrap не делает все новые аккаунты админист�
 Роль создаётся как `draft` с каноническим SHA-256, затем отдельно публикуется.
 Опубликованный JSON и provenance защищены PostgreSQL trigger от изменения и удаления.
 Участнику можно назначить несколько точных версий ролей; первая становится основной.
+
+Локальная спецификация оценки фиксирует точные ссылки и checksum конфигурации 4К,
+методологию, период, число кейсов и получателей результата. Статус `published`
+означает неизменяемость локального snapshot, но не runtime-допуск: до проверки через
+API 4К snapshot содержит `runtime_admission=pending_agent4k_verification`, а назначение
+не получает `external_cycle_id`.
 
 ## Проверки
 

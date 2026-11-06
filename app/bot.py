@@ -8,6 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 from aiogram.utils.deep_linking import create_start_link
 
+from app.application.assessments import AssessmentError, AssessmentService, AssessmentSpecDraft
 from app.application.participants import InvitationError, ParticipantService
 from app.application.projects import (
     AccessDeniedError,
@@ -48,6 +49,16 @@ class RoleWizard(StatesGroup):
     expected_outputs = State()
     interactions = State()
     crisp_dm_stages = State()
+
+
+class AssessmentSpecWizard(StatesGroup):
+    project_code = State()
+    configuration_ref = State()
+    configuration_checksum = State()
+    methodology_ref = State()
+    required_case_count = State()
+    period = State()
+    recipient_policy = State()
 
 
 def identity_from_message(message: Message) -> TelegramIdentity:
@@ -125,6 +136,10 @@ async def help_command(message: Message) -> None:
         "/roles PROJECT — версии ролей\n"
         "/assign_role PROJECT PARTICIPANT_ID ROLE — назначить роль\n"
         "/my_roles — мои роли в проектах\n"
+        "/new_spec — создать спецификацию оценки\n"
+        "/publish_spec PROJECT — опубликовать спецификацию\n"
+        "/specs PROJECT — версии спецификации\n"
+        "/assign_assessment PROJECT PARTICIPANT_ID ROLE — назначить оценку\n"
         "/progress — прогресс оценки\n"
         "/case — получить или продолжить кейс\n"
         "/cancel — отменить текущий диалог"
@@ -495,7 +510,195 @@ async def my_roles(message: Message, role_service: RoleService) -> None:
     )
 
 
-@router.message(Command("progress", "case"))
+@router.message(Command("new_spec"))
+async def new_spec(
+    message: Message, state: FSMContext, project_service: ProjectService
+) -> None:
+    _, is_admin = await project_service.ensure_actor(identity_from_message(message))
+    if not is_admin:
+        await message.answer("Создавать спецификации может только администратор.")
+        return
+    await state.clear()
+    await state.set_state(AssessmentSpecWizard.project_code)
+    await message.answer("Код проекта:")
+
+
+@router.message(AssessmentSpecWizard.project_code, F.text)
+async def spec_project(message: Message, state: FSMContext) -> None:
+    await state.update_data(project_code=message.text)
+    await state.set_state(AssessmentSpecWizard.configuration_ref)
+    await message.answer("Точная ссылка/ID опубликованной AssessmentConfiguration 4К:")
+
+
+@router.message(AssessmentSpecWizard.configuration_ref, F.text)
+async def spec_configuration(message: Message, state: FSMContext) -> None:
+    await state.update_data(assessment_configuration_ref=message.text)
+    await state.set_state(AssessmentSpecWizard.configuration_checksum)
+    await message.answer("SHA-256 этой конфигурации (64 hex-символа):")
+
+
+@router.message(AssessmentSpecWizard.configuration_checksum, F.text)
+async def spec_configuration_checksum(message: Message, state: FSMContext) -> None:
+    await state.update_data(assessment_configuration_checksum=message.text)
+    await state.set_state(AssessmentSpecWizard.methodology_ref)
+    await message.answer("Ссылка/версия методологии:")
+
+
+@router.message(AssessmentSpecWizard.methodology_ref, F.text)
+async def spec_methodology(message: Message, state: FSMContext) -> None:
+    await state.update_data(methodology_ref=message.text)
+    await state.set_state(AssessmentSpecWizard.required_case_count)
+    await message.answer("Сколько кейсов должен пройти участник?")
+
+
+@router.message(AssessmentSpecWizard.required_case_count, F.text)
+async def spec_case_count(message: Message, state: FSMContext) -> None:
+    await state.update_data(required_case_count=message.text)
+    await state.set_state(AssessmentSpecWizard.period)
+    await message.answer("Период: ДД.ММ.ГГГГ ДД.ММ.ГГГГ или '-':")
+
+
+@router.message(AssessmentSpecWizard.period, F.text)
+async def spec_period(message: Message, state: FSMContext) -> None:
+    try:
+        available_from, available_until = parse_optional_dates(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(
+        available_from=available_from,
+        available_until=available_until,
+    )
+    await state.set_state(AssessmentSpecWizard.recipient_policy)
+    await message.answer(
+        "Получатели результата: participant, instructor или participant_and_instructor:"
+    )
+
+
+@router.message(AssessmentSpecWizard.recipient_policy, F.text)
+async def spec_recipient_policy(
+    message: Message, state: FSMContext, assessment_service: AssessmentService
+) -> None:
+    data: dict[str, Any] = await state.get_data()
+    try:
+        project_code = str(data.pop("project_code"))
+        draft = AssessmentSpecDraft(
+            assessment_configuration_ref=str(data["assessment_configuration_ref"]),
+            assessment_configuration_checksum=str(data["assessment_configuration_checksum"]),
+            methodology_ref=str(data["methodology_ref"]),
+            required_case_count=int(str(data["required_case_count"])),
+            available_from=data["available_from"],
+            available_until=data["available_until"],
+            result_recipient_policy=(message.text or "").strip(),
+        )
+        result = await assessment_service.create_spec_draft(
+            identity_from_message(message), project_code=project_code, draft=draft
+        )
+    except (ValueError, AssessmentError, AccessDeniedError) as exc:
+        await message.answer(f"Спецификация не создана: {exc}\nИсправьте значение или /cancel.")
+        return
+    await state.clear()
+    await message.answer(
+        f"Draft спецификации v{result.version} создан.\n"
+        f"Кейсов: {result.required_case_count}\n"
+        f"Checksum: {result.checksum}\n"
+        f"Runtime: {result.runtime_admission}\n"
+        f"Опубликовать локальный snapshot: /publish_spec {project_code}"
+    )
+
+
+@router.message(Command("publish_spec"))
+async def publish_spec(
+    message: Message, command: CommandObject, assessment_service: AssessmentService
+) -> None:
+    if not command.args:
+        await message.answer("Формат: /publish_spec PROJECT_CODE")
+        return
+    try:
+        result = await assessment_service.publish_spec(
+            identity_from_message(message), project_code=command.args
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    await message.answer(
+        f"Локальная спецификация v{result.version} опубликована неизменяемо.\n"
+        f"Runtime 4К: {result.runtime_admission}."
+    )
+
+
+@router.message(Command("specs"))
+async def specs(
+    message: Message, command: CommandObject, assessment_service: AssessmentService
+) -> None:
+    if not command.args:
+        await message.answer("Формат: /specs PROJECT_CODE")
+        return
+    try:
+        items = await assessment_service.list_specs(
+            identity_from_message(message), project_code=command.args
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    if not items:
+        await message.answer("У проекта нет спецификаций оценки.")
+        return
+    await message.answer(
+        "\n".join(
+            f"v{item.version} — {item.status}; кейсов {item.required_case_count}; "
+            f"runtime {item.runtime_admission}"
+            for item in items
+        )
+    )
+
+
+@router.message(Command("assign_assessment"))
+async def assign_assessment(
+    message: Message, command: CommandObject, assessment_service: AssessmentService
+) -> None:
+    parts = (command.args or "").split()
+    if len(parts) != 3 or not parts[1].isdigit():
+        await message.answer(
+            "Формат: /assign_assessment PROJECT_CODE PARTICIPANT_ID ROLE_CODE"
+        )
+        return
+    try:
+        result = await assessment_service.assign(
+            identity_from_message(message),
+            project_code=parts[0],
+            participant_id=int(parts[1]),
+            role_code=parts[2],
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    await message.answer(
+        f"Оценка назначена: {result.project_code}, роль {result.role_code} "
+        f"v{result.role_version}, спецификация v{result.spec_version}.\n"
+        "Cycle 4К ещё не создан."
+    )
+
+
+@router.message(Command("progress"))
+async def progress(message: Message, assessment_service: AssessmentService) -> None:
+    items = await assessment_service.my_progress(identity_from_message(message))
+    if not items:
+        await message.answer("Вам пока не назначена оценка.")
+        return
+    await message.answer(
+        "\n\n".join(
+            f"{item.project_code}, роль {item.role_code} v{item.role_version}\n"
+            f"Пройдено: {item.completed_cases} из {item.required_cases}\n"
+            f"Осталось: {item.remaining_cases}\n"
+            f"Статус: {item.status}; Cycle 4К: "
+            f"{'создан' if item.runtime_connected else 'ожидает интеграции'}"
+            for item in items
+        )
+    )
+
+
+@router.message(Command("case"))
 async def not_connected_yet(message: Message) -> None:
     await message.answer("Функция станет доступна после подключения проекта администратором.")
 
@@ -504,11 +707,13 @@ def build_dispatcher(
     project_service: ProjectService,
     participant_service: ParticipantService,
     role_service: RoleService,
+    assessment_service: AssessmentService,
 ) -> Dispatcher:
     dispatcher = Dispatcher(
         project_service=project_service,
         participant_service=participant_service,
         role_service=role_service,
+        assessment_service=assessment_service,
     )
     dispatcher.include_router(router)
     return dispatcher

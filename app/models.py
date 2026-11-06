@@ -143,7 +143,11 @@ class ParticipantRole(Base):
 
 class ProjectAssessmentSpec(Base, TimestampMixin):
     __tablename__ = "project_assessment_specs"
-    __table_args__ = (UniqueConstraint("project_id", "version", name="uq_project_spec_version"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "version", name="uq_project_spec_version"),
+        CheckConstraint("required_case_count > 0", name="ck_spec_required_case_count"),
+        CheckConstraint("daily_case_limit = 1", name="ck_spec_daily_case_limit"),
+    )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
     version: Mapped[int]

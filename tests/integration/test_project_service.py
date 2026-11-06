@@ -10,6 +10,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.application.assessments import AssessmentError, AssessmentService, AssessmentSpecDraft
 from app.application.participants import InvitationError, ParticipantService
 from app.application.projects import (
     AccessDeniedError,
@@ -20,10 +21,12 @@ from app.application.projects import (
 from app.application.roles import RoleDraft, RoleService
 from app.db import session_factory
 from app.models import (
+    AssessmentAssignment,
     AuditEvent,
     Invitation,
     ParticipantRole,
     Project,
+    ProjectAssessmentSpec,
     ProjectParticipant,
     ProjectRoleVersion,
     User,
@@ -237,3 +240,116 @@ async def test_published_role_content_is_immutable(database_url: str) -> None:
             version = await session.scalar(select(ProjectRoleVersion))
             assert version is not None
             version.definition_json = {"changed": True}
+
+
+async def assessment_fixture(database_url: str) -> tuple[
+    AssessmentService, TelegramIdentity, TelegramIdentity, int
+]:
+    factory = session_factory(database_url)
+    projects = ProjectService(factory, bootstrap_admin_ids=(1001,))
+    participants = ParticipantService(factory, invitation_ttl_hours=168)
+    roles = RoleService(factory)
+    assessments = AssessmentService(factory)
+    admin = TelegramIdentity(1001, "Преподаватель", "teacher")
+    student = TelegramIdentity(2002, "Студент", "student")
+    await projects.ensure_actor(admin)
+    await projects.create_project(admin, sample_draft())
+    invitation = await participants.create_invitation(
+        admin, project_code="TBA-2026-G01", participant_name="Студент"
+    )
+    await participants.accept_invitation(student, token=invitation.token)
+    await roles.create_draft(
+        admin,
+        project_code="TBA-2026-G01",
+        draft=sample_role("business_analyst", "Бизнес-аналитик"),
+    )
+    await roles.publish(admin, project_code="TBA-2026-G01", role_code="business_analyst")
+    await roles.assign(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_id=invitation.participant_id,
+        role_code="business_analyst",
+    )
+    return assessments, admin, student, invitation.participant_id
+
+
+def sample_spec() -> AssessmentSpecDraft:
+    return AssessmentSpecDraft(
+        assessment_configuration_ref="agent4k:configuration:standard-4k:v1",
+        assessment_configuration_checksum="a" * 64,
+        methodology_ref="competencies_4k:1.1",
+        required_case_count=8,
+        available_from=date(2026, 11, 10),
+        available_until=date(2026, 12, 20),
+        result_recipient_policy="participant_and_instructor",
+    )
+
+
+async def test_published_spec_assigns_exact_role_and_exposes_progress(
+    database_url: str,
+) -> None:
+    assessments, admin, student, participant_id = await assessment_fixture(database_url)
+    created = await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01", draft=sample_spec()
+    )
+    assert created.runtime_admission == "pending_agent4k_verification"
+    published = await assessments.publish_spec(admin, project_code="TBA-2026-G01")
+    assert published.status == "published"
+    assignment = await assessments.assign(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_id=participant_id,
+        role_code="business_analyst",
+    )
+    assert assignment.status == "assigned"
+    assert assignment.runtime_connected is False
+    assert assignment.remaining_cases == 8
+    progress = await assessments.my_progress(student)
+    assert len(progress) == 1
+    assert progress[0].role_code == "business_analyst"
+    assert progress[0].remaining_cases == 8
+
+    factory = session_factory(database_url)
+    async with factory() as session:
+        stored = await session.scalar(select(AssessmentAssignment))
+        assert stored is not None
+        assert stored.external_cycle_id is None
+
+
+async def test_assessment_rejects_role_not_assigned_to_participant(database_url: str) -> None:
+    assessments, admin, _, participant_id = await assessment_fixture(database_url)
+    factory = session_factory(database_url)
+    roles = RoleService(factory)
+    await roles.create_draft(
+        admin,
+        project_code="TBA-2026-G01",
+        draft=sample_role("data_scientist", "Data Scientist"),
+    )
+    await roles.publish(admin, project_code="TBA-2026-G01", role_code="data_scientist")
+    await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01", draft=sample_spec()
+    )
+    await assessments.publish_spec(admin, project_code="TBA-2026-G01")
+
+    with pytest.raises(AssessmentError, match="не назначена"):
+        await assessments.assign(
+            admin,
+            project_code="TBA-2026-G01",
+            participant_id=participant_id,
+            role_code="data_scientist",
+        )
+
+
+async def test_published_assessment_spec_is_immutable(database_url: str) -> None:
+    assessments, admin, _, _ = await assessment_fixture(database_url)
+    await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01", draft=sample_spec()
+    )
+    await assessments.publish_spec(admin, project_code="TBA-2026-G01")
+
+    factory = session_factory(database_url)
+    with pytest.raises(DBAPIError, match="immutable"):
+        async with factory.begin() as session:
+            spec = await session.scalar(select(ProjectAssessmentSpec))
+            assert spec is not None
+            spec.snapshot_json = {"changed": True}

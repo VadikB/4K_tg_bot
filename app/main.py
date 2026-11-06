@@ -3,6 +3,7 @@ import logging
 
 from aiogram import Bot
 
+from app.application.assessments import AssessmentService
 from app.application.participants import ParticipantService
 from app.application.projects import ProjectService
 from app.application.roles import RoleService
@@ -25,9 +26,10 @@ async def run() -> None:
         invitation_ttl_hours=settings.invitation_ttl_hours,
     )
     role_service = RoleService(session_factory(settings.database_url))
+    assessment_service = AssessmentService(session_factory(settings.database_url))
     try:
         await build_dispatcher(
-            project_service, participant_service, role_service
+            project_service, participant_service, role_service, assessment_service
         ).start_polling(bot)
     finally:
         await bot.session.close()
