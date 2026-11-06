@@ -39,7 +39,8 @@
 - PostgreSQL integration → PASS, 11 tests.
 - Alembic `0006 -> 0005 -> 0006` → PASS.
 - `git diff --check` → PASS.
-- Реальная валидация ID/checksum через API 4К → NOT_RUN, следующий шаг.
+- Реальная HTTP-валидация ID/checksum через API 4К → PASS контрактными тестами:
+  опубликованная ссылка принимается, mismatch/недоступность не публикуют draft.
 
 ## Действия выпуска
 
@@ -54,6 +55,5 @@
 
 ## Следующий шаг
 
-Добавить read-only service API 4К для каталога published RoleProfileVersion и
-проверять ID/checksum до публикации проектной роли. Затем публиковать единый
-`ProjectAssessmentContextSnapshot` назначения.
+Read-only service API 4К и проверка перед публикацией выполнены. Следующий шаг —
+публиковать единый `ProjectAssessmentContextSnapshot` назначения.

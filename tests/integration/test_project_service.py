@@ -20,7 +20,7 @@ from app.application.projects import (
 )
 from app.application.roles import RoleDraft, RoleService
 from app.db import session_factory
-from app.integrations.agent4k import ParticipantIdentityLink
+from app.integrations.agent4k import ParticipantIdentityLink, PublishedRoleProfileReference
 from app.models import (
     AssessmentAssignment,
     AuditEvent,
@@ -34,6 +34,23 @@ from app.models import (
 )
 
 pytestmark = pytest.mark.integration
+
+
+class PublishedRoleAdapter:
+    async def get_published_role_profile(self, *, version_id: int):
+        return PublishedRoleProfileReference(
+            id=version_id,
+            code="specialist_expert",
+            version=1,
+            methodology_version="1.1",
+            checksum="a" * 64,
+        )
+
+    async def resolve_participant(self, *, email: str, display_name: str):
+        raise AssertionError("participant endpoint must not be called")
+
+    async def issue_next_case(self, *, cycle_id: str, idempotency_key: str):
+        raise AssertionError("case endpoint must not be called")
 
 
 def isolated_database_url() -> str:
@@ -282,7 +299,10 @@ async def test_participant_can_have_multiple_versioned_roles(database_url: str) 
         )
         assert created.status == "draft"
         published = await roles.publish(
-            admin, project_code="TBA-2026-G01", role_code=code
+            admin,
+            project_code="TBA-2026-G01",
+            role_code=code,
+            adapter=PublishedRoleAdapter(),
         )
         assert published.status == "published"
 
@@ -324,7 +344,12 @@ async def test_published_role_content_is_immutable(database_url: str) -> None:
         project_code="TBA-2026-G01",
         draft=sample_role("business_analyst", "Бизнес-аналитик"),
     )
-    await roles.publish(admin, project_code="TBA-2026-G01", role_code="business_analyst")
+    await roles.publish(
+        admin,
+        project_code="TBA-2026-G01",
+        role_code="business_analyst",
+        adapter=PublishedRoleAdapter(),
+    )
 
     with pytest.raises(DBAPIError, match="immutable"):
         async with factory.begin() as session:
@@ -363,7 +388,12 @@ async def assessment_fixture(database_url: str) -> tuple[
         project_code="TBA-2026-G01",
         draft=sample_role("business_analyst", "Бизнес-аналитик"),
     )
-    await roles.publish(admin, project_code="TBA-2026-G01", role_code="business_analyst")
+    await roles.publish(
+        admin,
+        project_code="TBA-2026-G01",
+        role_code="business_analyst",
+        adapter=PublishedRoleAdapter(),
+    )
     await roles.assign(
         admin,
         project_code="TBA-2026-G01",
@@ -425,7 +455,12 @@ async def test_assessment_rejects_role_not_assigned_to_participant(database_url:
         project_code="TBA-2026-G01",
         draft=sample_role("data_scientist", "Data Scientist"),
     )
-    await roles.publish(admin, project_code="TBA-2026-G01", role_code="data_scientist")
+    await roles.publish(
+        admin,
+        project_code="TBA-2026-G01",
+        role_code="data_scientist",
+        adapter=PublishedRoleAdapter(),
+    )
     await assessments.create_spec_draft(
         admin, project_code="TBA-2026-G01", draft=sample_spec()
     )

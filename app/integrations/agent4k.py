@@ -22,10 +22,23 @@ class ParticipantIdentityLink:
     status: str
 
 
+@dataclass(frozen=True)
+class PublishedRoleProfileReference:
+    id: int
+    code: str
+    version: int
+    methodology_version: str
+    checksum: str
+
+
 class Agent4KPort(Protocol):
     async def resolve_participant(
         self, *, email: str, display_name: str
     ) -> ParticipantIdentityLink: ...
+
+    async def get_published_role_profile(
+        self, *, version_id: int
+    ) -> PublishedRoleProfileReference: ...
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope: ...
 
@@ -35,6 +48,12 @@ class DisabledAgent4KAdapter:
         self, *, email: str, display_name: str
     ) -> ParticipantIdentityLink:
         del email, display_name
+        raise Agent4KUnavailableError("Agent4K integration is disabled")
+
+    async def get_published_role_profile(
+        self, *, version_id: int
+    ) -> PublishedRoleProfileReference:
+        del version_id
         raise Agent4KUnavailableError("Agent4K integration is disabled")
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope:
@@ -74,6 +93,25 @@ class HttpAgent4KAdapter:
             )
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             raise Agent4KUnavailableError("Agent4K participant identity request failed") from exc
+
+    async def get_published_role_profile(
+        self, *, version_id: int
+    ) -> PublishedRoleProfileReference:
+        try:
+            response = await self._client.get(
+                f"/integration/v1/role-profile-versions/{version_id}"
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return PublishedRoleProfileReference(
+                id=int(payload["id"]),
+                code=str(payload["code"]),
+                version=int(payload["version"]),
+                methodology_version=str(payload["methodology_version"]),
+                checksum=str(payload["checksum"]),
+            )
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise Agent4KUnavailableError("Agent4K role profile request failed") from exc
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope:
         try:

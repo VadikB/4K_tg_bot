@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.projects import AccessDeniedError, TelegramIdentity, normalize_project_code
 from app.domain.enums import CrispDmStage
+from app.integrations.agent4k import Agent4KPort
 from app.models import (
     AuditEvent,
     ParticipantRole,
@@ -231,8 +232,46 @@ class RoleService:
             return RoleView(validated.code, validated.name, version, "draft", checksum)
 
     async def publish(
-        self, identity: TelegramIdentity, *, project_code: str, role_code: str
+        self,
+        identity: TelegramIdentity,
+        *,
+        project_code: str,
+        role_code: str,
+        adapter: Agent4KPort,
     ) -> RoleView:
+        async with self._session_factory() as session:
+            await _require_admin(session, identity)
+            project = await _project(session, project_code)
+            role = await session.scalar(
+                select(ProjectRole).where(
+                    ProjectRole.project_id == project.id,
+                    ProjectRole.code == role_code.strip().lower(),
+                )
+            )
+            if role is None:
+                raise RoleError("Роль не найдена.")
+            draft = await session.scalar(
+                select(ProjectRoleVersion)
+                .where(
+                    ProjectRoleVersion.project_role_id == role.id,
+                    ProjectRoleVersion.status == "draft",
+                )
+                .order_by(ProjectRoleVersion.version.desc())
+            )
+            if draft is None:
+                raise RoleError("У роли нет draft-версии для публикации.")
+            if (
+                draft.agent4k_role_profile_version_id is None
+                or draft.agent4k_role_profile_checksum is None
+            ):
+                raise RoleError("Для роли не задано сопоставление с ролью 4К.")
+            mapping_id = draft.agent4k_role_profile_version_id
+            mapping_checksum = draft.agent4k_role_profile_checksum
+
+        published_ref = await adapter.get_published_role_profile(version_id=mapping_id)
+        if published_ref.id != mapping_id or published_ref.checksum != mapping_checksum:
+            raise RoleError("ID или checksum опубликованной роли 4К не совпадает.")
+
         async with self._session_factory.begin() as session:
             actor = await _require_admin(session, identity)
             project = await _project(session, project_code)
@@ -255,6 +294,11 @@ class RoleService:
             )
             if version is None:
                 raise RoleError("У роли нет draft-версии для публикации.")
+            if (
+                version.agent4k_role_profile_version_id != published_ref.id
+                or version.agent4k_role_profile_checksum != published_ref.checksum
+            ):
+                raise RoleError("Сопоставление роли изменилось; повторите проверку.")
             version.status = "published"
             version.published_at = datetime.now(UTC)
             session.add(

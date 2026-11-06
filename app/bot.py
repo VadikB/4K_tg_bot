@@ -509,7 +509,10 @@ async def role_stages(
 
 @router.message(Command("publish_role"))
 async def publish_role(
-    message: Message, command: CommandObject, role_service: RoleService
+    message: Message,
+    command: CommandObject,
+    role_service: RoleService,
+    agent4k_adapter: Agent4KPort,
 ) -> None:
     parts = (command.args or "").split()
     if len(parts) != 2:
@@ -517,9 +520,12 @@ async def publish_role(
         return
     try:
         result = await role_service.publish(
-            identity_from_message(message), project_code=parts[0], role_code=parts[1]
+            identity_from_message(message),
+            project_code=parts[0],
+            role_code=parts[1],
+            adapter=agent4k_adapter,
         )
-    except (RoleError, AccessDeniedError) as exc:
+    except (RoleError, AccessDeniedError, Agent4KUnavailableError) as exc:
         await message.answer(str(exc))
         return
     await message.answer(f"Роль {result.code} v{result.version} опубликована.")
