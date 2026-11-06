@@ -21,7 +21,11 @@ from app.application.projects import (
 )
 from app.application.roles import RoleDraft, RoleService
 from app.db import session_factory
-from app.integrations.agent4k import ParticipantIdentityLink, PublishedRoleProfileReference
+from app.integrations.agent4k import (
+    EducationalContextPreparation,
+    ParticipantIdentityLink,
+    PublishedRoleProfileReference,
+)
 from app.models import (
     AssessmentAssignment,
     AuditEvent,
@@ -53,6 +57,17 @@ class PublishedRoleAdapter:
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str):
         raise AssertionError("case endpoint must not be called")
+
+    async def prepare_educational_context(self, *, snapshot: dict, checksum: str):
+        return EducationalContextPreparation(
+            operation_id="educational-context:7",
+            status="awaiting_admission",
+            organization_id=31,
+            assignment_id=41,
+            assignment_ref=str(snapshot["assignment_ref"]),
+            reasons=("PROGRAM_NOT_CONNECTED",),
+            cycle_id=None,
+        )
 
 
 def isolated_database_url() -> str:
@@ -489,6 +504,12 @@ async def test_publishes_immutable_context_without_contact_identity(
         assert "student@example.edu" not in serialized
         assert stored.snapshot_json["role"]["agent4k_role_profile_version_id"] == 17
         assert stored.snapshot_json["assessment_spec"]["version"] == 1
+
+    preparation = await assessments.prepare_external_context(
+        admin, assignment_id=assignment.id, adapter=PublishedRoleAdapter()
+    )
+    assert preparation.status == "awaiting_admission"
+    assert preparation.reasons == ("PROGRAM_NOT_CONNECTED",)
 
     with pytest.raises(DBAPIError, match="immutable"):
         async with factory.begin() as session:

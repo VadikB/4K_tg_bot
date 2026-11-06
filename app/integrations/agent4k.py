@@ -31,6 +31,17 @@ class PublishedRoleProfileReference:
     checksum: str
 
 
+@dataclass(frozen=True)
+class EducationalContextPreparation:
+    operation_id: str
+    status: str
+    organization_id: int
+    assignment_id: int
+    assignment_ref: str
+    reasons: tuple[str, ...]
+    cycle_id: str | None
+
+
 class Agent4KPort(Protocol):
     async def resolve_participant(
         self, *, email: str, display_name: str
@@ -39,6 +50,10 @@ class Agent4KPort(Protocol):
     async def get_published_role_profile(
         self, *, version_id: int
     ) -> PublishedRoleProfileReference: ...
+
+    async def prepare_educational_context(
+        self, *, snapshot: dict[str, object], checksum: str
+    ) -> EducationalContextPreparation: ...
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope: ...
 
@@ -54,6 +69,12 @@ class DisabledAgent4KAdapter:
         self, *, version_id: int
     ) -> PublishedRoleProfileReference:
         del version_id
+        raise Agent4KUnavailableError("Agent4K integration is disabled")
+
+    async def prepare_educational_context(
+        self, *, snapshot: dict[str, object], checksum: str
+    ) -> EducationalContextPreparation:
+        del snapshot, checksum
         raise Agent4KUnavailableError("Agent4K integration is disabled")
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope:
@@ -129,6 +150,30 @@ class HttpAgent4KAdapter:
             )
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             raise Agent4KUnavailableError("Agent4K case request failed") from exc
+
+    async def prepare_educational_context(
+        self, *, snapshot: dict[str, object], checksum: str
+    ) -> EducationalContextPreparation:
+        try:
+            response = await self._client.post(
+                "/integration/v1/educational-contexts/prepare",
+                json={"snapshot": snapshot, "checksum": checksum},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return EducationalContextPreparation(
+                operation_id=str(payload["operation_id"]),
+                status=str(payload["status"]),
+                organization_id=int(payload["organization_id"]),
+                assignment_id=int(payload["assignment_id"]),
+                assignment_ref=str(payload["assignment_ref"]),
+                reasons=tuple(str(value) for value in payload.get("reasons", [])),
+                cycle_id=str(payload["cycle_id"]) if payload.get("cycle_id") else None,
+            )
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise Agent4KUnavailableError(
+                "Agent4K educational context request failed"
+            ) from exc
 
     async def close(self) -> None:
         await self._client.aclose()

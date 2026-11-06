@@ -68,3 +68,37 @@ async def test_http_adapter_reads_published_role_reference() -> None:
     assert result.id == 17
     assert result.checksum == "a" * 64
 
+
+async def test_http_adapter_prepares_educational_context() -> None:
+    snapshot = {"assignment_ref": "edu:4k-tg-bot:p1:a2"}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/integration/v1/educational-contexts/prepare"
+        assert json.loads(request.content) == {"snapshot": snapshot, "checksum": "a" * 64}
+        return httpx.Response(
+            200,
+            json={
+                "operation_id": "educational-context:7",
+                "status": "awaiting_admission",
+                "organization_id": 3,
+                "assignment_id": 9,
+                "assignment_ref": "edu:4k-tg-bot:p1:a2",
+                "reasons": ["PROGRAM_NOT_CONNECTED"],
+                "cycle_id": None,
+            },
+        )
+
+    adapter = HttpAgent4KAdapter(
+        base_url="https://agent4k.example",
+        token="private-service-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await adapter.prepare_educational_context(
+            snapshot=snapshot, checksum="a" * 64
+        )
+    finally:
+        await adapter.close()
+    assert result.status == "awaiting_admission"
+    assert result.reasons == ("PROGRAM_NOT_CONNECTED",)
+

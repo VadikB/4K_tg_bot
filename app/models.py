@@ -235,6 +235,24 @@ class ProjectAssessmentContextSnapshot(Base):
     )
 
 
+class AssessmentContextPreparation(Base):
+    __tablename__ = "assessment_context_preparations"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    context_snapshot_id: Mapped[int] = mapped_column(
+        ForeignKey("project_assessment_context_snapshots.id", ondelete="RESTRICT"),
+        unique=True,
+    )
+    external_operation_id: Mapped[str] = mapped_column(String(255), unique=True)
+    external_organization_id: Mapped[int] = mapped_column(BigInteger)
+    external_assignment_id: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(32))
+    reasons_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    external_cycle_id: Mapped[str | None] = mapped_column(String(255))
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class CaseDelivery(Base, TimestampMixin):
     __tablename__ = "case_deliveries"
     __table_args__ = (

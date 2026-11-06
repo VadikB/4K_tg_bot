@@ -50,6 +50,7 @@ python -m app.main
 /specs PROJECT  версии спецификации
 /assign_assessment PROJECT PARTICIPANT_ID ROLE  назначить оценку
 /publish_context ASSIGNMENT_ID  опубликовать неизменяемый контекст назначения
+/prepare_cycle ASSIGNMENT_ID  зарегистрировать контекст в 4К и проверить admission
 /progress     прогресс участника
 /cancel       отмена текущего диалога
 ```
@@ -80,6 +81,9 @@ API 4К snapshot содержит `runtime_admission=pending_agent4k_verificatio
 проектной роли и `RoleProfileVersion` 4К, спецификацию оценки и технический
 `agent4k_user_id`. Email, Telegram ID и отображаемое имя участника в snapshot не входят.
 Стабильный `assignment_ref` предназначен для последующего создания контекста и Cycle в 4К.
+Команда `/prepare_cycle ASSIGNMENT_ID` передаёт snapshot в 4К. Пока обязательные
+questionnaire, AssessmentProgram и PersonalizedProfile не допущены, бот сохраняет
+`awaiting_admission` и показывает точные причины; `external_cycle_id` не создаётся.
 
 При принятии приглашения бот вызывает
 `POST /integration/v1/participants/resolve` и сохраняет полученный внутренний ID 4К.

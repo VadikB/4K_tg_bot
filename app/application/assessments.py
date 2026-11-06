@@ -8,8 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.projects import AccessDeniedError, TelegramIdentity, normalize_project_code
 from app.application.roles import definition_checksum
+from app.integrations.agent4k import Agent4KPort, Agent4KUnavailableError
 from app.models import (
     AssessmentAssignment,
+    AssessmentContextPreparation,
     AuditEvent,
     CaseDelivery,
     ParticipantRole,
@@ -75,6 +77,15 @@ class AssessmentContextSnapshotView:
     assignment_ref: str
     status: str
     checksum: str
+
+
+@dataclass(frozen=True)
+class AssessmentContextPreparationView:
+    assignment_id: int
+    operation_id: str
+    status: str
+    reasons: tuple[str, ...]
+    cycle_id: str | None
 
 
 def validate_spec_draft(draft: AssessmentSpecDraft) -> AssessmentSpecDraft:
@@ -504,6 +515,103 @@ class AssessmentService:
             return AssessmentContextSnapshotView(
                 context.id, assignment.id, assignment_ref, context.status, checksum
             )
+
+    async def prepare_external_context(
+        self,
+        identity: TelegramIdentity,
+        *,
+        assignment_id: int,
+        adapter: Agent4KPort,
+    ) -> AssessmentContextPreparationView:
+        async with self._session_factory() as session:
+            await _require_admin(session, identity)
+            context = await session.scalar(
+                select(ProjectAssessmentContextSnapshot)
+                .join(
+                    AssessmentAssignment,
+                    AssessmentAssignment.id
+                    == ProjectAssessmentContextSnapshot.assessment_assignment_id,
+                )
+                .where(AssessmentAssignment.id == assignment_id)
+            )
+            if context is None:
+                raise AssessmentError("Сначала опубликуйте контекст назначения.")
+            snapshot = dict(context.snapshot_json)
+            checksum = context.checksum
+            context_id = context.id
+            if definition_checksum(snapshot) != checksum:
+                raise AssessmentError("Checksum snapshot контекста не совпадает.")
+
+        try:
+            external = await adapter.prepare_educational_context(
+                snapshot=snapshot, checksum=checksum
+            )
+        except Agent4KUnavailableError as exc:
+            raise AssessmentError("4К недоступен; подготовку можно повторить позже.") from exc
+        if external.assignment_ref != str(snapshot["assignment_ref"]):
+            raise AssessmentError("4К вернул другой assignment_ref.")
+        if external.status == "prepared" and not external.cycle_id:
+            raise AssessmentError("4К вернул prepared без cycle_id.")
+
+        async with self._session_factory.begin() as session:
+            actor = await _require_admin(session, identity)
+            current = await session.scalar(
+                select(ProjectAssessmentContextSnapshot)
+                .where(ProjectAssessmentContextSnapshot.id == context_id)
+                .with_for_update()
+            )
+            if current is None or current.checksum != checksum:
+                raise AssessmentError("Snapshot контекста изменился во время подготовки.")
+            state = await session.scalar(
+                select(AssessmentContextPreparation).where(
+                    AssessmentContextPreparation.context_snapshot_id == context_id
+                )
+            )
+            if state is None:
+                state = AssessmentContextPreparation(
+                    context_snapshot_id=context_id,
+                    external_operation_id=external.operation_id,
+                    external_organization_id=external.organization_id,
+                    external_assignment_id=external.assignment_id,
+                    status=external.status,
+                    reasons_json=list(external.reasons),
+                    external_cycle_id=external.cycle_id,
+                )
+                session.add(state)
+            else:
+                state.external_operation_id = external.operation_id
+                state.external_organization_id = external.organization_id
+                state.external_assignment_id = external.assignment_id
+                state.status = external.status
+                state.reasons_json = list(external.reasons)
+                state.external_cycle_id = external.cycle_id
+                state.checked_at = datetime.now(UTC)
+            assignment = await session.get(AssessmentAssignment, assignment_id)
+            if assignment is None:
+                raise AssessmentError("Назначение оценки не найдено.")
+            if external.status == "prepared" and external.cycle_id:
+                assignment.external_cycle_id = external.cycle_id
+            session.add(
+                AuditEvent(
+                    actor_user_id=actor.id,
+                    project_id=None,
+                    entity_type="assessment_context_preparation",
+                    entity_id=str(context_id),
+                    action="checked",
+                    payload_json={
+                        "status": external.status,
+                        "operation_id": external.operation_id,
+                        "reasons": list(external.reasons),
+                    },
+                )
+            )
+        return AssessmentContextPreparationView(
+            assignment_id,
+            external.operation_id,
+            external.status,
+            external.reasons,
+            external.cycle_id,
+        )
 
     async def my_progress(self, identity: TelegramIdentity) -> list[AssessmentAssignmentView]:
         async with self._session_factory() as session:

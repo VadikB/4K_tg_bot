@@ -157,6 +157,7 @@ async def help_command(message: Message) -> None:
         "/specs PROJECT — версии спецификации\n"
         "/assign_assessment PROJECT PARTICIPANT_ID ROLE — назначить оценку\n"
         "/publish_context ASSIGNMENT_ID — зафиксировать контекст назначения\n"
+        "/prepare_cycle ASSIGNMENT_ID — проверить admission и подготовку Cycle\n"
         "/progress — прогресс оценки\n"
         "/case — получить или продолжить кейс\n"
         "/cancel — отменить текущий диалог"
@@ -801,6 +802,35 @@ async def progress(message: Message, assessment_service: AssessmentService) -> N
             f"{'создан' if item.runtime_connected else 'ожидает интеграции'}"
             for item in items
         )
+    )
+
+
+@router.message(Command("prepare_cycle"))
+async def prepare_cycle(
+    message: Message,
+    command: CommandObject,
+    assessment_service: AssessmentService,
+    agent4k_adapter: Agent4KPort,
+) -> None:
+    if not command.args or not command.args.strip().isdigit():
+        await message.answer("Формат: /prepare_cycle ASSIGNMENT_ID")
+        return
+    try:
+        result = await assessment_service.prepare_external_context(
+            identity_from_message(message),
+            assignment_id=int(command.args.strip()),
+            adapter=agent4k_adapter,
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    if result.status == "prepared":
+        await message.answer(f"Cycle 4К подготовлен: {result.cycle_id}")
+        return
+    reasons = "\n".join(f"• {reason}" for reason in result.reasons)
+    await message.answer(
+        "Контекст зарегистрирован в 4К и ожидает admission.\n"
+        f"Operation: {result.operation_id}\nПричины:\n{reasons or 'не указаны'}"
     )
 
 
