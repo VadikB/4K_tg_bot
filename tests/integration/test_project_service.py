@@ -1,11 +1,12 @@
 import os
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.application.participants import InvitationError, ParticipantService
 from app.application.projects import (
     AccessDeniedError,
     ProjectDraft,
@@ -13,7 +14,7 @@ from app.application.projects import (
     TelegramIdentity,
 )
 from app.db import session_factory
-from app.models import AuditEvent, Base, Project
+from app.models import AuditEvent, Base, Invitation, Project, ProjectParticipant, User
 
 pytestmark = pytest.mark.integration
 
@@ -83,3 +84,58 @@ async def test_participant_cannot_create_project(database_url: str) -> None:
 
     with pytest.raises(AccessDeniedError, match="только администратор"):
         await service.create_project(identity, sample_draft())
+
+
+async def test_one_time_invitation_connects_telegram_identity(database_url: str) -> None:
+    factory = session_factory(database_url)
+    projects = ProjectService(factory, bootstrap_admin_ids=(1001,))
+    participants = ParticipantService(factory, invitation_ttl_hours=168)
+    admin = TelegramIdentity(1001, "Преподаватель", "teacher")
+    student = TelegramIdentity(2002, "Студент", "student")
+    await projects.ensure_actor(admin)
+    await projects.create_project(admin, sample_draft())
+
+    secret = await participants.create_invitation(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_name="Ожидаемый студент",
+    )
+    project = await participants.accept_invitation(student, token=secret.token)
+    assert project.code == "TBA-2026-G01"
+    assert [item.code for item in await projects.list_projects(student)] == ["TBA-2026-G01"]
+
+    async with factory() as session:
+        invitation = await session.scalar(select(Invitation))
+        member = await session.scalar(select(ProjectParticipant))
+        user = await session.scalar(select(User).where(User.telegram_user_id == 2002))
+        assert invitation is not None and invitation.used_at is not None
+        assert invitation.token_hash != secret.token
+        assert member is not None and member.user_id == user.id
+        assert member.status == "active"
+        assert member.display_name == "Студент"
+
+    with pytest.raises(InvitationError, match="уже использовано"):
+        await participants.accept_invitation(student, token=secret.token)
+
+
+async def test_expired_invitation_is_rejected(database_url: str) -> None:
+    factory = session_factory(database_url)
+    projects = ProjectService(factory, bootstrap_admin_ids=(1001,))
+    participants = ParticipantService(factory, invitation_ttl_hours=1)
+    admin = TelegramIdentity(1001, "Преподаватель", "teacher")
+    await projects.ensure_actor(admin)
+    await projects.create_project(admin, sample_draft())
+    issued_at = datetime(2026, 11, 6, 10, tzinfo=UTC)
+    secret = await participants.create_invitation(
+        admin,
+        project_code="TBA-2026-G01",
+        participant_name="Студент",
+        now=issued_at,
+    )
+
+    with pytest.raises(InvitationError, match="истёк"):
+        await participants.accept_invitation(
+            TelegramIdentity(2002, "Студент"),
+            token=secret.token,
+            now=issued_at + timedelta(hours=2),
+        )

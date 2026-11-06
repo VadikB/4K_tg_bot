@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     agent4k_integration_mode: IntegrationMode = IntegrationMode.DISABLED
     bootstrap_admin_telegram_ids: tuple[int, ...] = ()
     default_project_timezone: str = "Europe/Moscow"
+    invitation_ttl_hours: int = 168
 
     @field_validator("bootstrap_admin_telegram_ids", mode="before")
     @classmethod
@@ -41,4 +42,6 @@ class Settings(BaseSettings):
             "test",
         }:
             raise ValueError("Mock integration is allowed only in local and test environments")
+        if not 1 <= self.invitation_ttl_hours <= 720:
+            raise ValueError("INVITATION_TTL_HOURS must be between 1 and 720")
 

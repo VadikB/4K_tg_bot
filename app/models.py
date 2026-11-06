@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -74,10 +75,19 @@ class ProjectStage(Base, TimestampMixin):
 
 class ProjectParticipant(Base, TimestampMixin):
     __tablename__ = "project_participants"
-    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_participant"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", name="uq_project_participant"),
+        CheckConstraint(
+            "user_id IS NOT NULL OR status = 'invited'",
+            name="ck_project_participant_identity",
+        ),
+    )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    display_name: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(32), default="invited")
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

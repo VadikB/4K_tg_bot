@@ -2,11 +2,13 @@ from datetime import date
 from typing import Any
 
 from aiogram import Dispatcher, F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
+from aiogram.utils.deep_linking import create_start_link
 
+from app.application.participants import InvitationError, ParticipantService
 from app.application.projects import (
     AccessDeniedError,
     DuplicateProjectCodeError,
@@ -28,6 +30,11 @@ class ProjectWizard(StatesGroup):
     description = State()
     timezone = State()
     dates = State()
+
+
+class ParticipantWizard(StatesGroup):
+    project_code = State()
+    display_name = State()
 
 
 def identity_from_message(message: Message) -> TelegramIdentity:
@@ -56,13 +63,32 @@ def parse_optional_dates(value: str) -> tuple[date | None, date | None]:
 
 
 @router.message(CommandStart())
-async def start(message: Message, project_service: ProjectService) -> None:
+async def start(
+    message: Message,
+    command: CommandObject,
+    project_service: ProjectService,
+    participant_service: ParticipantService,
+) -> None:
+    if command.args:
+        try:
+            project = await participant_service.accept_invitation(
+                identity_from_message(message), token=command.args
+            )
+        except (InvitationError, AccessDeniedError) as exc:
+            await message.answer(f"Не удалось принять приглашение: {exc}")
+            return
+        await message.answer(
+            f"Вы подключены к проекту {project.code} — {project.name}.\n"
+            "Используйте /projects для просмотра карточки."
+        )
+        return
     _, is_admin = await project_service.ensure_actor(identity_from_message(message))
     if is_admin:
         await message.answer(
             "Вы вошли как администратор.\n"
             "/new_project — создать проект\n"
-            "/projects — список проектов"
+            "/projects — список проектов\n"
+            "/add_participant — пригласить участника"
         )
     else:
         await message.answer(
@@ -78,6 +104,8 @@ async def help_command(message: Message) -> None:
         "/start — подключение к боту\n"
         "/projects — мои проекты\n"
         "/new_project — создать проект (администратор)\n"
+        "/add_participant — пригласить участника (администратор)\n"
+        "/participants CODE — участники проекта (администратор)\n"
         "/progress — прогресс оценки\n"
         "/case — получить или продолжить кейс\n"
         "/cancel — отменить текущий диалог"
@@ -195,13 +223,88 @@ async def projects(message: Message, project_service: ProjectService) -> None:
     await message.answer("\n\n".join(cards))
 
 
+@router.message(Command("add_participant"))
+async def add_participant(
+    message: Message, state: FSMContext, project_service: ProjectService
+) -> None:
+    _, is_admin = await project_service.ensure_actor(identity_from_message(message))
+    if not is_admin:
+        await message.answer("Приглашать участников может только администратор.")
+        return
+    await state.clear()
+    await state.set_state(ParticipantWizard.project_code)
+    await message.answer("Введите код проекта:")
+
+
+@router.message(ParticipantWizard.project_code, F.text)
+async def participant_project_code(message: Message, state: FSMContext) -> None:
+    await state.update_data(project_code=message.text)
+    await state.set_state(ParticipantWizard.display_name)
+    await message.answer("Введите имя участника для списка проекта:")
+
+
+@router.message(ParticipantWizard.display_name, F.text)
+async def participant_display_name(
+    message: Message, state: FSMContext, participant_service: ParticipantService
+) -> None:
+    data: dict[str, Any] = await state.get_data()
+    try:
+        invitation = await participant_service.create_invitation(
+            identity_from_message(message),
+            project_code=str(data["project_code"]),
+            participant_name=message.text or "",
+        )
+        if message.bot is None:
+            raise RuntimeError("Telegram bot context is unavailable")
+        link = await create_start_link(message.bot, invitation.token, encode=False)
+    except (ValueError, AccessDeniedError) as exc:
+        await message.answer(f"Приглашение не создано: {exc}\nИсправьте имя или /cancel.")
+        return
+    await state.clear()
+    await message.answer(
+        f"Участник добавлен в проект {invitation.project_code}.\n"
+        f"Одноразовая ссылка действует до {invitation.expires_at:%d.%m.%Y %H:%M %Z}:\n"
+        f"{link}\n\nПередайте ссылку только этому участнику."
+    )
+
+
+@router.message(Command("participants"))
+async def participants(
+    message: Message, command: CommandObject, participant_service: ParticipantService
+) -> None:
+    if not command.args:
+        await message.answer("Укажите код: /participants TBA-2026-G01")
+        return
+    try:
+        items = await participant_service.list_participants(
+            identity_from_message(message), project_code=command.args
+        )
+    except (ValueError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    if not items:
+        await message.answer("В проекте пока нет участников.")
+        return
+    lines = [
+        f"{item.display_name} — {item.status}"
+        f" ({'Telegram подключён' if item.telegram_connected else 'ожидает входа'})"
+        for item in items
+    ]
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("progress", "case"))
 async def not_connected_yet(message: Message) -> None:
     await message.answer("Функция станет доступна после подключения проекта администратором.")
 
 
-def build_dispatcher(project_service: ProjectService) -> Dispatcher:
-    dispatcher = Dispatcher(project_service=project_service)
+def build_dispatcher(
+    project_service: ProjectService, participant_service: ParticipantService
+) -> Dispatcher:
+    dispatcher = Dispatcher(
+        project_service=project_service,
+        participant_service=participant_service,
+    )
     dispatcher.include_router(router)
     return dispatcher
 
