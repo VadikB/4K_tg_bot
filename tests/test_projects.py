@@ -8,6 +8,7 @@ from app.application.projects import (
     validate_project_draft,
 )
 from app.bot import (
+    bot_commands,
     generate_course_external_id,
     generate_project_code,
     parse_optional_dates,
@@ -94,4 +95,11 @@ def test_course_external_id_is_stable_for_normalized_name() -> None:
     assert generate_course_external_id(" Технологии  бизнес-аналитики ") == (
         generate_course_external_id("технологии бизнес-аналитики")
     )
+
+
+def test_bot_menu_contains_participant_and_role_lists() -> None:
+    commands = [item.command for item in bot_commands()]
+    assert len(commands) == len(set(commands))
+    assert "participants" in commands
+    assert "roles" in commands
 

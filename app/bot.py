@@ -9,7 +9,7 @@ from aiogram import Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import BotCommand, Message
 from aiogram.utils.deep_linking import create_start_link
 
 from app.application.assessments import AssessmentError, AssessmentService, AssessmentSpecDraft
@@ -25,6 +25,33 @@ from app.application.roles import RoleDraft, RoleError, RoleService, parse_items
 from app.integrations.agent4k import Agent4KPort, Agent4KUnavailableError
 
 router = Router()
+
+
+def bot_commands() -> list[BotCommand]:
+    return [
+        BotCommand(command="start", description="Войти и показать основные команды"),
+        BotCommand(command="help", description="Показать полный список команд"),
+        BotCommand(command="new_project", description="Создать учебный проект"),
+        BotCommand(command="projects", description="Показать доступные проекты"),
+        BotCommand(command="add_participant", description="Пригласить участника"),
+        BotCommand(command="participants", description="Список участников проекта"),
+        BotCommand(command="new_role", description="Создать CRISP-DM-роль"),
+        BotCommand(command="roles", description="Список ролей проекта"),
+        BotCommand(command="publish_role", description="Опубликовать роль"),
+        BotCommand(command="assign_role", description="Назначить роль участнику"),
+        BotCommand(command="my_roles", description="Мои роли в проектах"),
+        BotCommand(command="new_spec", description="Создать спецификацию оценки"),
+        BotCommand(command="specs", description="Список спецификаций проекта"),
+        BotCommand(command="publish_spec", description="Опубликовать спецификацию"),
+        BotCommand(command="assign_assessment", description="Назначить оценку"),
+        BotCommand(command="publish_context", description="Зафиксировать контекст оценки"),
+        BotCommand(command="prepare_cycle", description="Подготовить цикл оценки 4К"),
+        BotCommand(command="admission_programs", description="Совместимые программы 4К"),
+        BotCommand(command="connect_program", description="Подключить программу 4К"),
+        BotCommand(command="progress", description="Показать прогресс оценки"),
+        BotCommand(command="case", description="Получить или продолжить кейс"),
+        BotCommand(command="cancel", description="Отменить текущий диалог"),
+    ]
 
 
 class ProjectWizard(StatesGroup):
@@ -160,7 +187,10 @@ async def start(
             "/new_project — создать проект\n"
             "/projects — список проектов\n"
             "/add_participant — пригласить участника\n"
-            "/new_role — создать CRISP-DM-роль"
+            "/participants PROJECT_CODE — список участников\n"
+            "/new_role — создать CRISP-DM-роль\n"
+            "/roles PROJECT_CODE — список ролей\n"
+            "/help — полный список команд"
         )
     else:
         await message.answer(

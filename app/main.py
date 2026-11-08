@@ -7,7 +7,7 @@ from app.application.assessments import AssessmentService
 from app.application.participants import ParticipantService
 from app.application.projects import ProjectService
 from app.application.roles import RoleService
-from app.bot import build_dispatcher
+from app.bot import bot_commands, build_dispatcher
 from app.config import Settings
 from app.db import session_factory
 from app.integrations.agent4k import DisabledAgent4KAdapter, HttpAgent4KAdapter
@@ -37,6 +37,7 @@ async def run() -> None:
         else DisabledAgent4KAdapter()
     )
     try:
+        await bot.set_my_commands(bot_commands())
         await build_dispatcher(
             project_service,
             participant_service,
