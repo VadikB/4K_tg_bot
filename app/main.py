@@ -43,6 +43,7 @@ async def run() -> None:
             role_service,
             assessment_service,
             agent4k_adapter,
+            settings.default_project_timezone,
         ).start_polling(bot)
     finally:
         if isinstance(agent4k_adapter, HttpAgent4KAdapter):

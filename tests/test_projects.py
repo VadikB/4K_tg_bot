@@ -7,7 +7,13 @@ from app.application.projects import (
     normalize_project_code,
     validate_project_draft,
 )
-from app.bot import parse_optional_dates, parse_project_timezone
+from app.bot import (
+    generate_course_external_id,
+    generate_project_code,
+    parse_optional_dates,
+    parse_project_timezone,
+    parse_required_answer,
+)
 
 
 def draft(**overrides: object) -> ProjectDraft:
@@ -70,4 +76,22 @@ def test_project_timezone_parser_accepts_iana_name() -> None:
 def test_project_timezone_parser_rejects_utc_offset() -> None:
     with pytest.raises(ValueError, match="часовой пояс"):
         parse_project_timezone("+3")
+
+
+def test_required_answer_rejects_empty_text() -> None:
+    with pytest.raises(ValueError, match="не может быть пустым"):
+        parse_required_answer("   ", "Название проекта")
+
+
+def test_generated_project_code_matches_domain_format() -> None:
+    code = generate_project_code()
+    assert code.startswith("PRJ-")
+    assert len(code) == 16
+    assert validate_project_draft(draft(code=code)).code == code
+
+
+def test_course_external_id_is_stable_for_normalized_name() -> None:
+    assert generate_course_external_id(" Технологии  бизнес-аналитики ") == (
+        generate_course_external_id("технологии бизнес-аналитики")
+    )
 

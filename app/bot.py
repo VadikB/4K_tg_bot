@@ -1,5 +1,8 @@
+import hashlib
+import unicodedata
 from datetime import date
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Dispatcher, F, Router
@@ -25,15 +28,12 @@ router = Router()
 
 
 class ProjectWizard(StatesGroup):
-    code = State()
     name = State()
-    course_external_id = State()
     course = State()
     cohort = State()
     business_problem = State()
     expected_result = State()
     description = State()
-    timezone = State()
     dates = State()
 
 
@@ -99,6 +99,27 @@ def parse_project_timezone(value: str) -> str:
     except ZoneInfoNotFoundError as exc:
         raise ValueError("Неизвестный часовой пояс IANA.") from exc
     return timezone_name
+
+
+def parse_required_answer(value: str, field_name: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"Поле «{field_name}» не может быть пустым.")
+    if len(normalized) > 4000:
+        raise ValueError(f"Поле «{field_name}» не должно превышать 4000 символов.")
+    return normalized
+
+
+def generate_project_code() -> str:
+    return f"PRJ-{uuid4().hex[:12].upper()}"
+
+
+def generate_course_external_id(course_name: str) -> str:
+    canonical_name = " ".join(
+        unicodedata.normalize("NFKC", course_name).casefold().split()
+    )
+    digest = hashlib.sha256(canonical_name.encode("utf-8")).hexdigest()[:16]
+    return f"course-{digest}"
 
 
 @router.message(CommandStart())
@@ -178,15 +199,24 @@ async def help_command(message: Message) -> None:
 
 @router.message(Command("new_project"))
 async def new_project(
-    message: Message, state: FSMContext, project_service: ProjectService
+    message: Message,
+    state: FSMContext,
+    project_service: ProjectService,
+    default_project_timezone: str,
 ) -> None:
     _, is_admin = await project_service.ensure_actor(identity_from_message(message))
     if not is_admin:
         await message.answer("Создавать проекты может только администратор.")
         return
     await state.clear()
-    await state.set_state(ProjectWizard.code)
-    await message.answer("Введите короткий код проекта, например TBA-2026-G01:")
+    try:
+        timezone_name = parse_project_timezone(default_project_timezone)
+    except ValueError:
+        await message.answer("Проект не начат: неверен DEFAULT_PROJECT_TIMEZONE.")
+        return
+    await state.update_data(code=generate_project_code(), timezone=timezone_name)
+    await state.set_state(ProjectWizard.name)
+    await message.answer("Название проекта:")
 
 
 @router.message(Command("cancel"))
@@ -195,74 +225,87 @@ async def cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Диалог отменён.")
 
 
-@router.message(ProjectWizard.code, F.text)
-async def project_code(message: Message, state: FSMContext) -> None:
-    await state.update_data(code=message.text)
-    await state.set_state(ProjectWizard.name)
-    await message.answer("Название проекта:")
-
-
 @router.message(ProjectWizard.name, F.text)
 async def project_name(message: Message, state: FSMContext) -> None:
-    await state.update_data(name=message.text)
-    await state.set_state(ProjectWizard.course_external_id)
-    await message.answer("Стабильный машинный ID курса, например tba-2026-mba01:")
-
-
-@router.message(ProjectWizard.course_external_id, F.text)
-async def project_course_external_id(message: Message, state: FSMContext) -> None:
-    await state.update_data(course_external_id=message.text)
+    try:
+        name = parse_required_answer(message.text or "", "Название проекта")
+    except ValueError as exc:
+        await message.answer(f"Ответ не принят: {exc}\nВведите название проекта:")
+        return
+    await state.update_data(name=name)
     await state.set_state(ProjectWizard.course)
     await message.answer("Название курса:")
 
 
 @router.message(ProjectWizard.course, F.text)
 async def project_course(message: Message, state: FSMContext) -> None:
-    await state.update_data(course=message.text)
+    try:
+        course = parse_required_answer(message.text or "", "Название курса")
+    except ValueError as exc:
+        await message.answer(f"Ответ не принят: {exc}\nВведите название курса:")
+        return
+    await state.update_data(
+        course=course,
+        course_external_id=generate_course_external_id(course),
+    )
     await state.set_state(ProjectWizard.cohort)
     await message.answer("Поток или учебная группа; '-' если не требуется:")
 
 
 @router.message(ProjectWizard.cohort, F.text)
 async def project_cohort(message: Message, state: FSMContext) -> None:
-    text = message.text or ""
-    await state.update_data(cohort=None if text.strip() == "-" else text)
+    text = (message.text or "").strip()
+    if text == "-":
+        cohort = None
+    else:
+        try:
+            cohort = parse_required_answer(text, "Поток или учебная группа")
+        except ValueError as exc:
+            await message.answer(
+                f"Ответ не принят: {exc}\nВведите группу или '-' если она не требуется:"
+            )
+            return
+    await state.update_data(cohort=cohort)
     await state.set_state(ProjectWizard.business_problem)
     await message.answer("Опишите бизнес-проблему:")
 
 
 @router.message(ProjectWizard.business_problem, F.text)
 async def project_problem(message: Message, state: FSMContext) -> None:
-    await state.update_data(business_problem=message.text)
+    try:
+        value = parse_required_answer(message.text or "", "Бизнес-проблема")
+    except ValueError as exc:
+        await message.answer(f"Ответ не принят: {exc}\nОпишите бизнес-проблему:")
+        return
+    await state.update_data(business_problem=value)
     await state.set_state(ProjectWizard.expected_result)
     await message.answer("Какой результат должен получить проект?")
 
 
 @router.message(ProjectWizard.expected_result, F.text)
 async def project_result(message: Message, state: FSMContext) -> None:
-    await state.update_data(expected_result=message.text)
+    try:
+        value = parse_required_answer(message.text or "", "Ожидаемый результат")
+    except ValueError as exc:
+        await message.answer(
+            f"Ответ не принят: {exc}\nКакой результат должен получить проект?"
+        )
+        return
+    await state.update_data(expected_result=value)
     await state.set_state(ProjectWizard.description)
     await message.answer("Краткое описание проекта:")
 
 
 @router.message(ProjectWizard.description, F.text)
 async def project_description(message: Message, state: FSMContext) -> None:
-    await state.update_data(description=message.text)
-    await state.set_state(ProjectWizard.timezone)
-    await message.answer("Часовой пояс IANA, например Europe/Moscow:")
-
-
-@router.message(ProjectWizard.timezone, F.text)
-async def project_timezone(message: Message, state: FSMContext) -> None:
     try:
-        timezone_name = parse_project_timezone(message.text or "")
+        value = parse_required_answer(message.text or "", "Описание проекта")
     except ValueError as exc:
         await message.answer(
-            f"Часовой пояс не сохранён: {exc}\n"
-            "Введите значение IANA, например Europe/Moscow, или /cancel."
+            f"Ответ не принят: {exc}\nВведите краткое описание проекта:"
         )
         return
-    await state.update_data(timezone=timezone_name)
+    await state.update_data(description=value)
     await state.set_state(ProjectWizard.dates)
     await message.answer("Даты начала и завершения: ДД.ММ.ГГГГ ДД.ММ.ГГГГ или '-':")
 
@@ -283,8 +326,7 @@ async def project_dates(
     await message.answer(
         f"Проект создан.\n"
         f"{project.code} — {project.name}\n"
-        f"Статус: {project.status}\n"
-        f"Часовой пояс: {project.timezone}"
+        f"Статус: {project.status}"
     )
 
 
@@ -948,6 +990,7 @@ def build_dispatcher(
     role_service: RoleService,
     assessment_service: AssessmentService,
     agent4k_adapter: Agent4KPort,
+    default_project_timezone: str,
 ) -> Dispatcher:
     dispatcher = Dispatcher(
         project_service=project_service,
@@ -955,6 +998,7 @@ def build_dispatcher(
         role_service=role_service,
         assessment_service=assessment_service,
         agent4k_adapter=agent4k_adapter,
+        default_project_timezone=default_project_timezone,
     )
     dispatcher.include_router(router)
     return dispatcher
