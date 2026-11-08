@@ -1,5 +1,6 @@
 from datetime import date
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -89,6 +90,15 @@ def parse_optional_dates(value: str) -> tuple[date | None, date | None]:
     except ValueError as exc:
         raise ValueError("Введите корректные даты в формате ДД.ММ.ГГГГ.") from exc
     return starts_on, ends_on
+
+
+def parse_project_timezone(value: str) -> str:
+    timezone_name = value.strip()
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("Неизвестный часовой пояс IANA.") from exc
+    return timezone_name
 
 
 @router.message(CommandStart())
@@ -244,7 +254,15 @@ async def project_description(message: Message, state: FSMContext) -> None:
 
 @router.message(ProjectWizard.timezone, F.text)
 async def project_timezone(message: Message, state: FSMContext) -> None:
-    await state.update_data(timezone=(message.text or "").strip())
+    try:
+        timezone_name = parse_project_timezone(message.text or "")
+    except ValueError as exc:
+        await message.answer(
+            f"Часовой пояс не сохранён: {exc}\n"
+            "Введите значение IANA, например Europe/Moscow, или /cancel."
+        )
+        return
+    await state.update_data(timezone=timezone_name)
     await state.set_state(ProjectWizard.dates)
     await message.answer("Даты начала и завершения: ДД.ММ.ГГГГ ДД.ММ.ГГГГ или '-':")
 

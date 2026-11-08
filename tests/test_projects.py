@@ -7,7 +7,7 @@ from app.application.projects import (
     normalize_project_code,
     validate_project_draft,
 )
-from app.bot import parse_optional_dates
+from app.bot import parse_optional_dates, parse_project_timezone
 
 
 def draft(**overrides: object) -> ProjectDraft:
@@ -61,4 +61,13 @@ def test_optional_dates_parser() -> None:
 def test_invalid_dates_are_rejected() -> None:
     with pytest.raises(ValueError, match="корректные даты"):
         parse_optional_dates("31.02.2026 20.12.2026")
+
+
+def test_project_timezone_parser_accepts_iana_name() -> None:
+    assert parse_project_timezone(" Europe/Moscow ") == "Europe/Moscow"
+
+
+def test_project_timezone_parser_rejects_utc_offset() -> None:
+    with pytest.raises(ValueError, match="часовой пояс"):
+        parse_project_timezone("+3")
 
