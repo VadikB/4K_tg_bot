@@ -1,0 +1,19 @@
+[Unit]
+Description=4K Telegram bot
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=vadim_bogachev
+Group=vadim_bogachev
+WorkingDirectory=/home/vadim_bogachev/projects/4K_tg_bot
+EnvironmentFile=/home/vadim_bogachev/projects/4K_tg_bot/.env
+ExecStart=/home/vadim_bogachev/projects/4K_tg_bot/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
