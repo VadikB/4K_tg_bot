@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "evidence_id": "synthetic-semester-v1-2026-11-10",
+  "recorded_at": "2026-11-10",
+  "fixture": {
+    "id": "synthetic-semester",
+    "version": "1.0",
+    "status": "qa_only",
+    "roles_sha256": "b3e1bdc2a77e3f2f101841d5e9c7bc20819ae3f56f3615ef74d1902f22d25398",
+    "scenarios_sha256": "0efdfd8d5d56358e4af4f73eec5cc67ec4d562636b5a9529b7f904cfb5f07ac4"
+  },
+  "repositories": {
+    "telegram_bot": {
+      "branch": "codex/tg-student-channel-client",
+      "base_sha": "ae42436cabd015a28badbde09dbef796cb82bf28",
+      "candidate_sha": null
+    },
+    "agent4k": {
+      "branch": "codex/tg-student-channel-api",
+      "base_sha": "bc63a8ee4a21c36a124dd0040bd44a9f9cccefed",
+      "candidate_sha": null
+    }
+  },
+  "results": {
+    "fixture_contract": "PASS",
+    "telegram_postgresql_readback": "PASS",
+    "agent4k_multi_context_readback": "PASS",
+    "channel_first_as": "PASS",
+    "channel_exact_replay": "PASS",
+    "channel_payload_conflict": "PASS",
+    "three_assignment_acquaintance_isolation": "PASS",
+    "three_profile_cycle_progress_isolation": "PASS_TECHNICAL_DISTINCT_ROLE_PROFILES",
+    "single_role_first_case": "PASS_TECHNICAL",
+    "multi_project_multi_role_isolation": "PASS_TECHNICAL_COMPOSED"
+  },
+  "counts": {
+    "synthetic_participants": 1,
+    "projects": 2,
+    "assignments": 3,
+    "first_as_presented": 1,
+    "real_participants": 0,
+    "real_llm_calls": 0
+  },
+  "limitations": [
+    "M10 start permission is a synthetic upstream substitution, not human or methodological admission",
+    "Telegram assignments and Agent4K profile/cycle scopes are verified by composed tests, not one cross-repository transaction",
+    "Synthetic mapping from course CRISP-DM roles to Agent4K RoleProfile versions is not a methodology claim",
+    "No claim of methodology validity or assessment quality",
+    "No real Telegram, student, deployment or production data",
+    "Candidate SHA is null until an authorized commit exists"
+  ],
+  "release_actions": {
+    "push": false,
+    "pull_request": false,
+    "merge": false,
+    "deploy": false,
+    "artifact_publish": false
+  }
+}

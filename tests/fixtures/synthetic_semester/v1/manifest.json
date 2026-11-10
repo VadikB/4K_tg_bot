@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-semester",
+  "version": "1.0",
+  "status": "qa_only",
+  "scope": "telegram-student-channel",
+  "owner": "course_owner",
+  "source": "ТГ бот для студентов.md",
+  "profile": "assessment-first-case/1.1",
+  "artifacts": [
+    {"name": "roles.json", "sha256": "b3e1bdc2a77e3f2f101841d5e9c7bc20819ae3f56f3615ef74d1902f22d25398"},
+    {"name": "scenarios.json", "sha256": "0efdfd8d5d56358e4af4f73eec5cc67ec4d562636b5a9529b7f904cfb5f07ac4"}
+  ],
+  "claims": {
+    "technical_workability": true,
+    "methodology_validity": false,
+    "real_student_acceptance": false
+  }
+}

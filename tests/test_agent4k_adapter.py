@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from app.integrations.agent4k import (
+    Agent4KChannelActionError,
     Agent4KUnavailableError,
     DisabledAgent4KAdapter,
     HttpAgent4KAdapter,
@@ -145,4 +146,143 @@ async def test_http_adapter_lists_and_connects_educational_program() -> None:
         await adapter.close()
     assert options[0].id == 55
     assert connected.status == "connected"
+
+
+async def test_http_adapter_reads_channel_state() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == (
+            "/integration/v1/educational-assignments/"
+            "edu:4k-tg-bot:p1:a2/channel-state"
+        )
+        return httpx.Response(200, json={
+            "schema_version": 1,
+            "assignment_ref": "edu:4k-tg-bot:p1:a2",
+            "cycle_id": "cycle-77",
+            "state": "action_required",
+            "revision": 3,
+            "next_action": {
+                "action_id": "channel-action:opaque",
+                "type": "case_turn",
+                "presentation": {
+                    "participant_payload": {"title": "Учебная ситуация"},
+                    "trace": {"turns": [], "events": []},
+                    "input": {"kind": "text", "required": True},
+                },
+            },
+            "progress": {
+                "status": "active",
+                "completed": 1,
+                "required": 4,
+                "remaining": 3,
+                "next_available_at": None,
+            },
+        })
+
+    adapter = HttpAgent4KAdapter(
+        base_url="https://agent4k.example",
+        token="private-service-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await adapter.read_educational_channel_state(
+            assignment_ref="edu:4k-tg-bot:p1:a2"
+        )
+    finally:
+        await adapter.close()
+    assert result.state == "action_required"
+    assert result.next_action is not None
+    assert result.next_action.action_type == "case_turn"
+    assert result.progress is not None
+    assert result.progress.remaining == 3
+
+
+async def test_disabled_adapter_rejects_channel_state() -> None:
+    adapter = DisabledAgent4KAdapter()
+    with pytest.raises(Agent4KUnavailableError, match="disabled"):
+        await adapter.read_educational_channel_state(
+            assignment_ref="edu:4k-tg-bot:p1:a2"
+        )
+
+
+async def test_http_adapter_applies_channel_action() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith(
+            "/edu:4k-tg-bot:p1:a2/channel-actions"
+        )
+        assert request.headers["Idempotency-Key"] == "telegram-update:101"
+        assert json.loads(request.content) == {
+            "schema_version": 1,
+            "action_id": "channel-action:opaque",
+            "expected_revision": 3,
+            "input": {"kind": "text", "text": "Ответ"},
+        }
+        return httpx.Response(200, json={
+            "schema_version": 1,
+            "assignment_ref": "edu:4k-tg-bot:p1:a2",
+            "cycle_id": "cycle-77",
+            "state": "waiting",
+            "revision": 4,
+            "next_action": None,
+            "progress": {
+                "status": "active",
+                "completed": 1,
+                "required": 4,
+                "remaining": 3,
+                "next_available_at": None,
+            },
+        })
+
+    adapter = HttpAgent4KAdapter(
+        base_url="https://agent4k.example",
+        token="private-service-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await adapter.apply_educational_channel_action(
+            assignment_ref="edu:4k-tg-bot:p1:a2",
+            action_id="channel-action:opaque",
+            expected_revision=3,
+            action_input={"kind": "text", "text": "Ответ"},
+            idempotency_key="telegram-update:101",
+        )
+    finally:
+        await adapter.close()
+    assert result.state == "waiting"
+    assert result.revision == 4
+
+
+async def test_disabled_adapter_rejects_channel_action() -> None:
+    adapter = DisabledAgent4KAdapter()
+    with pytest.raises(Agent4KUnavailableError, match="disabled"):
+        await adapter.apply_educational_channel_action(
+            assignment_ref="edu:4k-tg-bot:p1:a2",
+            action_id="channel-action:opaque",
+            expected_revision=3,
+            action_input={"kind": "confirm"},
+            idempotency_key="telegram-update:101",
+        )
+
+
+@pytest.mark.parametrize("code", ["STALE_CHANNEL_REVISION", "IDEMPOTENCY_CONFLICT"])
+async def test_http_adapter_preserves_channel_conflict(code: str) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": code})
+
+    adapter = HttpAgent4KAdapter(
+        base_url="https://agent4k.example",
+        token="private-service-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(Agent4KChannelActionError) as caught:
+            await adapter.apply_educational_channel_action(
+                assignment_ref="edu:4k-tg-bot:p1:a2",
+                action_id="action-1",
+                expected_revision=3,
+                action_input={"kind": "text", "text": "Ответ"},
+                idempotency_key="telegram-update:101",
+            )
+    finally:
+        await adapter.close()
+    assert caught.value.code == code
 

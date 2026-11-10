@@ -1,0 +1,175 @@
+# SDD: Telegram-канал студента v1
+
+Свободная обратная связь не является действием оценки 4К и не входит в этот
+независимый slice; её контракт и выпуск ведутся отдельно.
+
+Статус: `DRAFT`. Клиент реализован в изолированной ветке; выпуск не разрешён.
+
+Режим допуска: `development_only`. Клиент разрешено разрабатывать и проверять
+только против fake/mock либо явно изолированного draft API. Реальное подключение к
+общему контуру 4К, merge, deploy и публикация запрещены до принятия рисков product
+owner 4К и отдельного решения о выпуске.
+
+## 1. Наблюдаемый результат
+
+Студент проходит обязательные шаги назначения и первый Case/AS целиком в Telegram.
+Бот отображает участническую проекцию, отправленную 4К, передаёт ответ и показывает
+канонический progress. Бот не выбирает Case, не рассчитывает лимиты и не
+интерпретирует компетенции.
+
+## 2. Принятые продуктовые решения
+
+- Одна dummy Organization 4К соответствует курсу и потоку.
+- Несколько учебных проектов живут внутри этого контура как сущности бота и как
+  immutable project context назначения в 4К.
+- Студент может участвовать в нескольких проектах и иметь несколько ролей.
+- Одна роль проекта соответствует отдельным Assignment и Cycle.
+- Telegram — единственный интерфейс студента текущего семестра.
+- Questionnaire, PersonalizedProfile, Case/AS, progress и availability принадлежат 4К.
+- Results и аудитории результата будут специфицированы отдельно.
+
+## 3. Источник внешнего контракта
+
+Канонический draft: `Agent4K/docs/architecture/product-4k/telegram-student-channel-v1.md`.
+Бот не расширяет его собственными предметными defaults. До публикации API
+`/case` остаётся fail-closed.
+
+## 4. Сценарий SDD-CH-01: продолжить назначение
+
+```yaml
+id: SDD-CH-01
+status: draft
+owner: product-owner
+priority: must
+given:
+  - Telegram identity связан с участником проекта
+  - назначение имеет published context snapshot
+  - assignment_ref принадлежит этому участнику
+when:
+  - студент вызывает /case
+then:
+  - бот получает channel-state из 4К
+  - бот показывает только presentation текущего next_action
+  - бот сохраняет техническую связь Telegram message с action_id и revision
+  - бот не вычисляет следующий предметный этап
+```
+
+## 5. Сценарий SDD-CH-02: передать ответ
+
+```yaml
+id: SDD-CH-02
+status: draft
+owner: product-owner
+priority: must
+given:
+  - студент отвечает на актуальный action
+when:
+  - бот отправляет action_id, expected_revision и input
+then:
+  - запрос имеет стабильный Idempotency-Key
+  - timeout повторяется с тем же ключом
+  - committed ответ 4К заменяет локальную проекцию
+  - stale action не создаёт второй Turn
+```
+
+## 6. Сценарий SDD-CH-03: несколько проектов и ролей
+
+```yaml
+id: SDD-CH-03
+status: draft
+owner: product-owner
+priority: must
+given:
+  - студент состоит в двух проектах одной dummy Organization
+  - в одном проекте у студента две роли
+when:
+  - студент вызывает /case
+then:
+  - бот показывает список активных назначений, если их больше одного
+  - выбор привязан к точному assignment_ref
+  - progress, action и Cycle разных назначений не смешиваются
+```
+
+## 7. Сценарий SDD-CH-04: безопасный отказ
+
+```yaml
+id: SDD-CH-04
+status: draft
+owner: technical-owner
+priority: must
+given:
+  - 4К недоступен или вернул technical_failure
+when:
+  - студент запрашивает или отправляет действие
+then:
+  - бот сообщает о временной недоступности и предлагает безопасный retry
+  - бот не выдаёт локальный Case и не меняет progress
+  - текст ответа студента не пишется в application log
+```
+
+## 8. Локальные данные
+
+Допустима только техническая проекция:
+
+- `assignment_ref` и внешний `cycle_id`;
+- `action_id`, `revision`, тип input;
+- idempotency key и checksum отправляемого payload;
+- статус операции и timestamps;
+- Telegram chat/message IDs, необходимые для маршрутизации.
+
+Questionnaire definitions, PersonalizedProfile rules, Case/AS content, оценочные
+критерии, required case count и вычисленный progress не становятся локальными
+runtime-настройками. Текст ответа не дублируется после подтверждённого commit без
+отдельно обоснованной необходимости восстановления.
+
+## 9. Telegram UX v1
+
+- `/case` при одном активном назначении сразу открывает `next_action`.
+- При нескольких назначениях бот показывает проект и роль; выбор делается
+  командой `/case ASSIGNMENT_ID`. Локальный ID преобразуется в сохранённый
+  `assignment_ref` только после проверки принадлежности Telegram-пользователю.
+- Text input принимается только при актуальном `input.kind=text`.
+- Текстовый ответ привязан к `action_id + revision` и стабильному
+  idempotency key; `input.kind=confirm` выполняется командой `/case`.
+- `/progress` читает 4К; локальный счётчик используется только до переключения и
+  не объявляется каноническим. Если 4К вернул `next_available_at`, бот показывает
+  его без локального расчёта дневного лимита.
+- `cycle_completed` показывает только факт завершения. Results не показываются до
+  отдельного решения о получателях.
+
+## 10. Критерии приёмки реализации
+
+- [ ] Студент завершает первый Case/AS без перехода в web UI.
+- [ ] Questionnaire и PersonalizedProfile доступны через тот же state/action loop.
+- [x] Повтор после потери HTTP-ответа не создаёт второй Turn в изолированном
+  cross-repository HTTP/ASGI тесте; общий контур не проверен.
+- [x] Два проекта и несколько ролей изолированы по `assignment_ref` в
+  синтетическом DB/API readback; единый реальный Telegram→4К прогон не выполнен.
+- [x] Чужой `assignment_ref` не раскрывается и не исполняется в локальных
+  сервисных и handler-тестах.
+- [x] Бот не содержит runtime fallback с Case, лимитом или progress;
+  `mock` использует только явно указанный loopback HTTP-стаб.
+- [ ] Закрытые материалы оценки и provider trace не попадают в Telegram и logs.
+- [x] Unit, PostgreSQL integration, HTTP-adapter и Telegram handler tests
+  проходят локально; CI и реальный Telegram API не запускались.
+
+## 11. Вне v1
+
+- Results/Report и политика аудиторий;
+- участие одного пользователя в нескольких Organization 4К;
+- корпоративный Telegram как дополнительный канал;
+- вложения, голосовые ответы и rich media;
+- изменение методологии, Case или AssessmentProgram.
+
+## 12. Откат
+
+До runtime удалить draft. После реализации отключить channel feature, сохранить
+операционный журнал и внешние IDs, не удалять Cycle/AS/Turn/Results в 4К.
+
+## 13. Условия продвижения
+
+- принято решение product owner 4К о рисках интеграции;
+- platform API и client имеют совместимые candidate SHA в integration manifest;
+- API остаётся opt-in, базовая функциональность 4К имеет PASS регрессии;
+- Telegram handler tests и сквозной isolated test имеют PASS;
+- release owner отдельно разрешил merge/deploy.

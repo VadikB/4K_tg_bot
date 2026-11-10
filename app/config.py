@@ -1,4 +1,5 @@
 from enum import StrEnum
+from urllib.parse import urlsplit
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,11 +38,14 @@ class Settings(BaseSettings):
         if self.agent4k_integration_mode is IntegrationMode.HTTP:
             if not self.agent4k_api_url or not self.agent4k_api_token:
                 raise ValueError("HTTP integration requires AGENT4K_API_URL and AGENT4K_API_TOKEN")
-        if self.agent4k_integration_mode is IntegrationMode.MOCK and self.app_env not in {
-            "local",
-            "test",
-        }:
-            raise ValueError("Mock integration is allowed only in local and test environments")
+        if self.agent4k_integration_mode is IntegrationMode.MOCK:
+            if self.app_env not in {"local", "test"}:
+                raise ValueError("Mock integration is allowed only in local and test environments")
+            endpoint = urlsplit(self.agent4k_api_url)
+            if endpoint.scheme != "http" or endpoint.hostname not in {
+                "127.0.0.1", "localhost", "::1",
+            }:
+                raise ValueError("Mock integration requires a loopback HTTP AGENT4K_API_URL")
         if not 1 <= self.invitation_ttl_hours <= 720:
             raise ValueError("INVITATION_TTL_HOURS must be between 1 and 720")
 

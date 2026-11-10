@@ -253,6 +253,40 @@ class AssessmentContextPreparation(Base):
     )
 
 
+class StudentChannelInputBinding(Base, TimestampMixin):
+    __tablename__ = "student_channel_input_bindings"
+    __table_args__ = (
+        Index(
+            "uq_student_channel_pending_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'sending')"),
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'sending', 'completed', 'stale')",
+            name="ck_student_channel_binding_status",
+        ),
+        CheckConstraint("input_kind = 'text'", name="ck_student_channel_input_kind"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    assessment_assignment_id: Mapped[int] = mapped_column(
+        ForeignKey("assessment_assignments.id", ondelete="RESTRICT")
+    )
+    assignment_ref: Mapped[str] = mapped_column(String(200))
+    action_id: Mapped[str] = mapped_column(String(255))
+    expected_revision: Mapped[int]
+    input_kind: Mapped[str] = mapped_column(String(32), default="text")
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
+    payload_checksum: Mapped[str | None] = mapped_column(String(64))
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    response_revision: Mapped[int | None]
+    attempt_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CaseDelivery(Base, TimestampMixin):
     __tablename__ = "case_deliveries"
     __table_args__ = (

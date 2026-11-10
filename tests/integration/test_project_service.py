@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -22,6 +23,11 @@ from app.application.projects import (
 from app.application.roles import RoleDraft, RoleService
 from app.db import session_factory
 from app.integrations.agent4k import (
+    Agent4KChannelActionError,
+    Agent4KUnavailableError,
+    ChannelNextAction,
+    ChannelProgress,
+    EducationalChannelState,
     EducationalContextPreparation,
     EducationalProgramConnection,
     EducationalProgramOption,
@@ -37,9 +43,12 @@ from app.models import (
     ProjectAssessmentContextSnapshot,
     ProjectAssessmentSpec,
     ProjectParticipant,
+    ProjectRole,
     ProjectRoleVersion,
+    StudentChannelInputBinding,
     User,
 )
+from tests.synthetic_semester import evaluate_bot_readback, load_package
 
 pytestmark = pytest.mark.integration
 
@@ -90,6 +99,61 @@ class PublishedRoleAdapter:
             program_code="student-4k",
             program_version="1.0",
             status="connected",
+        )
+
+
+class SyntheticChannelAdapter(PublishedRoleAdapter):
+    def __init__(self) -> None:
+        self.read_refs: list[str] = []
+        self.action_calls: list[dict[str, object]] = []
+        self.fail_next_action = False
+        self.stale_next_action = False
+        self.pause_action: tuple[asyncio.Event, asyncio.Event] | None = None
+
+    async def read_educational_channel_state(self, *, assignment_ref: str):
+        self.read_refs.append(assignment_ref)
+        return EducationalChannelState(
+            assignment_ref=assignment_ref,
+            cycle_id=f"cycle:{assignment_ref}",
+            state="action_required",
+            revision=3,
+            next_action=ChannelNextAction(
+                action_id=f"action:{assignment_ref}",
+                action_type="case_continue",
+                participant_payload=None,
+                trace=None,
+                input={"kind": "confirm"},
+            ),
+            progress=ChannelProgress(
+                status="active", completed=0, required=3, remaining=3,
+                next_available_at=None,
+            ),
+        )
+
+    async def apply_educational_channel_action(self, **kwargs: object):
+        self.action_calls.append(kwargs)
+        if self.pause_action is not None:
+            started, released = self.pause_action
+            started.set()
+            await released.wait()
+            self.pause_action = None
+        if self.stale_next_action:
+            self.stale_next_action = False
+            raise Agent4KChannelActionError("STALE_CHANNEL_REVISION")
+        if self.fail_next_action:
+            self.fail_next_action = False
+            raise Agent4KUnavailableError("synthetic timeout")
+        assignment_ref = str(kwargs["assignment_ref"])
+        return EducationalChannelState(
+            assignment_ref=assignment_ref,
+            cycle_id=f"cycle:{assignment_ref}",
+            state="action_required",
+            revision=4,
+            next_action=None,
+            progress=ChannelProgress(
+                status="active", completed=0, required=3, remaining=3,
+                next_available_at=None,
+            ),
         )
 
 
@@ -484,6 +548,299 @@ async def test_published_spec_assigns_exact_role_and_exposes_progress(
         stored = await session.scalar(select(AssessmentAssignment))
         assert stored is not None
         assert stored.external_cycle_id is None
+
+
+async def test_synthetic_semester_multi_project_role_assignment_readback(
+    database_url: str,
+) -> None:
+    package = load_package()
+    scenario = next(
+        item
+        for item in package["scenarios"]["scenarios"]
+        if item["id"] == "multi-project-multi-role-isolation"
+    )
+    role_sources = {item["code"]: item for item in package["roles"]["roles"]}
+    project_codes = {
+        "project-demand": "SYNTH-DEMAND",
+        "project-segmentation": "SYNTH-SEGMENTATION",
+    }
+    factory = session_factory(database_url)
+    projects = ProjectService(factory, bootstrap_admin_ids=(1001,))
+    participants = ParticipantService(factory, invitation_ttl_hours=168)
+    roles = RoleService(factory)
+    assessments = AssessmentService(factory)
+    admin = TelegramIdentity(1001, "Синтетический преподаватель", "synthetic_teacher")
+    student = TelegramIdentity(2002, "Синтетический студент", "synthetic_student")
+    await projects.ensure_actor(admin)
+    participant_ids = {}
+    for project_ref, project_code in project_codes.items():
+        draft = sample_draft(project_code)
+        draft = replace(draft, name=project_ref)
+        await projects.create_project(admin, draft)
+        invitation = await participants.create_invitation(
+            admin,
+            project_code=project_code,
+            participant_name="Синтетический студент",
+            participant_email="synthetic-student-01@example.test",
+        )
+        await participants.accept_invitation(student, token=invitation.token)
+        participant_ids[project_ref] = invitation.participant_id
+
+    assignments_by_fixture_ref = {}
+    for expected in scenario["assignments"]:
+        project_code = project_codes[expected["project_ref"]]
+        source = role_sources[expected["role_code"]]
+        await roles.create_draft(
+            admin,
+            project_code=project_code,
+            draft=RoleDraft(
+                code=source["code"], name=source["name"], mission=source["name"],
+                responsibilities=tuple(source["responsibilities"]),
+                typical_tasks=tuple(source["responsibilities"]),
+                expected_outputs=("Синтетический артефакт",),
+                interactions=tuple(source["interacts_with"]),
+                crisp_dm_stages=tuple(source["crisp_dm_phases"]),
+                agent4k_role_profile_version_id=17,
+                agent4k_role_profile_checksum="a" * 64,
+            ),
+        )
+        await roles.publish(
+            admin, project_code=project_code, role_code=source["code"],
+            adapter=PublishedRoleAdapter(),
+        )
+        await roles.assign(
+            admin, project_code=project_code,
+            participant_id=participant_ids[expected["project_ref"]], role_code=source["code"],
+        )
+
+    for project_ref, project_code in project_codes.items():
+        await assessments.create_spec_draft(admin, project_code=project_code, draft=sample_spec())
+        await assessments.publish_spec(admin, project_code=project_code)
+        async with factory.begin() as session:
+            participant = await session.get(ProjectParticipant, participant_ids[project_ref])
+            assert participant is not None
+            participant.agent4k_user_id = 42001
+            participant.agent4k_linked_at = datetime.now(UTC)
+
+    for expected in scenario["assignments"]:
+        assigned = await assessments.assign(
+            admin,
+            project_code=project_codes[expected["project_ref"]],
+            participant_id=participant_ids[expected["project_ref"]],
+            role_code=expected["role_code"],
+        )
+        snapshot = await assessments.publish_context_snapshot(admin, assignment_id=assigned.id)
+        assignments_by_fixture_ref[expected["ref"]] = snapshot.assignment_ref
+
+    observed = {"assignments": []}
+    async with factory() as session:
+        rows = (
+            await session.execute(
+                select(
+                    AssessmentAssignment,
+                    ProjectAssessmentContextSnapshot,
+                    ProjectParticipant,
+                    Project,
+                    ProjectRole,
+                )
+                .join(
+                    ProjectAssessmentContextSnapshot,
+                    ProjectAssessmentContextSnapshot.assessment_assignment_id
+                    == AssessmentAssignment.id,
+                )
+                .join(
+                    ProjectParticipant,
+                    ProjectParticipant.id == AssessmentAssignment.participant_id,
+                )
+                .join(Project, Project.id == ProjectParticipant.project_id)
+                .join(
+                    ProjectRoleVersion,
+                    ProjectRoleVersion.id == AssessmentAssignment.project_role_version_id,
+                )
+                .join(ProjectRole, ProjectRole.id == ProjectRoleVersion.project_role_id)
+            )
+        ).all()
+    fixture_by_external = {value: key for key, value in assignments_by_fixture_ref.items()}
+    project_ref_by_code = {value: key for key, value in project_codes.items()}
+    for _, context, _, project, role in rows:
+        observed["assignments"].append({
+            "fixture_assignment_ref": fixture_by_external[context.assignment_ref],
+            "assignment_ref": context.assignment_ref,
+            "project_ref": project_ref_by_code[project.code],
+            "participant_ref": "student-01",
+            "role_code": role.code,
+        })
+    result = evaluate_bot_readback(scenario, observed)
+    assert result["status"] == "passed", result
+
+    channel_adapter = SyntheticChannelAdapter()
+    channel_assignments = await assessments.my_channel_assignments(student)
+    assert len(channel_assignments) == 3
+    assert len({item.assignment_ref for item in channel_assignments}) == 3
+    states = [
+        await assessments.read_my_channel_state(
+            student, assignment_id=item.assignment_id, adapter=channel_adapter,
+        )
+        for item in channel_assignments
+    ]
+    assert {state.assignment_ref for state in states} == {
+        item.assignment_ref for item in channel_assignments
+    }
+    selected = channel_assignments[0]
+    applied = await assessments.apply_my_channel_action(
+        student,
+        assignment_id=selected.assignment_id,
+        action_id=f"action:{selected.assignment_ref}",
+        expected_revision=3,
+        action_input={"kind": "confirm"},
+        idempotency_key="synthetic-channel-action",
+        adapter=channel_adapter,
+    )
+    assert applied.assignment_ref == selected.assignment_ref
+    assert channel_adapter.action_calls[0]["assignment_ref"] == selected.assignment_ref
+    text_assignment = channel_assignments[1]
+    await assessments.bind_my_channel_text_action(
+        student,
+        assignment_id=text_assignment.assignment_id,
+        action_id=f"text-action:{text_assignment.assignment_ref}",
+        expected_revision=7,
+        idempotency_key="synthetic-text-action",
+    )
+    submitted = await assessments.submit_my_pending_channel_text(
+        student,
+        text="  Синтетический ответ, который нельзя сохранять  ",
+        telegram_chat_id=2002,
+        telegram_message_id=501,
+        adapter=channel_adapter,
+    )
+    assert submitted is not None
+    assert submitted.assignment_id == text_assignment.assignment_id
+    assert channel_adapter.action_calls[1]["action_input"] == {
+        "kind": "text",
+        "text": "  Синтетический ответ, который нельзя сохранять  ",
+    }
+    async with factory() as session:
+        binding = await session.scalar(select(StudentChannelInputBinding))
+        assert binding is not None
+        assert binding.status == "completed"
+        assert binding.telegram_message_id == 501
+        assert binding.payload_checksum is not None
+        stored = json.dumps({
+            "assignment_ref": binding.assignment_ref,
+            "action_id": binding.action_id,
+            "idempotency_key": binding.idempotency_key,
+        }, ensure_ascii=False)
+        assert "Синтетический ответ" not in stored
+    retry_assignment = channel_assignments[2]
+    await assessments.bind_my_channel_text_action(
+        student,
+        assignment_id=retry_assignment.assignment_id,
+        action_id=f"text-action:{retry_assignment.assignment_ref}",
+        expected_revision=9,
+        idempotency_key="synthetic-text-retry",
+    )
+    channel_adapter.fail_next_action = True
+    with pytest.raises(AssessmentError, match="тот же ответ"):
+        await assessments.submit_my_pending_channel_text(
+            student,
+            text="Повторяемый ответ",
+            telegram_chat_id=2002,
+            telegram_message_id=502,
+            adapter=channel_adapter,
+        )
+    calls_after_timeout = len(channel_adapter.action_calls)
+    with pytest.raises(AssessmentError, match="того же ответа"):
+        await assessments.submit_my_pending_channel_text(
+            student,
+            text="Подменённый ответ",
+            telegram_chat_id=2002,
+            telegram_message_id=503,
+            adapter=channel_adapter,
+        )
+    with pytest.raises(AssessmentError, match="исходном чате"):
+        await assessments.submit_my_pending_channel_text(
+            student,
+            text="Повторяемый ответ",
+            telegram_chat_id=9999,
+            telegram_message_id=504,
+            adapter=channel_adapter,
+        )
+    assert len(channel_adapter.action_calls) == calls_after_timeout
+    async with factory.begin() as session:
+        crashed = await session.scalar(
+            select(StudentChannelInputBinding).where(
+                StudentChannelInputBinding.action_id
+                == f"text-action:{retry_assignment.assignment_ref}"
+            )
+        )
+        assert crashed is not None and crashed.status == "pending"
+        crashed.status = "sending"
+        crashed.attempt_started_at = datetime.now(UTC) - timedelta(minutes=6)
+    retried = await assessments.submit_my_pending_channel_text(
+        student,
+        text="Повторяемый ответ",
+        telegram_chat_id=2002,
+        telegram_message_id=502,
+        adapter=channel_adapter,
+    )
+    assert retried is not None
+    assert channel_adapter.action_calls[-2]["idempotency_key"] == (
+        channel_adapter.action_calls[-1]["idempotency_key"]
+    )
+    await assessments.bind_my_channel_text_action(
+        student,
+        assignment_id=selected.assignment_id,
+        action_id="slow-action",
+        expected_revision=10,
+        idempotency_key="synthetic-slow-action",
+    )
+    started, released = asyncio.Event(), asyncio.Event()
+    channel_adapter.pause_action = (started, released)
+    first_send = asyncio.create_task(assessments.submit_my_pending_channel_text(
+        student,
+        text="Одновременный ответ",
+        telegram_chat_id=2002,
+        telegram_message_id=505,
+        adapter=channel_adapter,
+    ))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    with pytest.raises(AssessmentError, match="уже отправляется"):
+        await assessments.submit_my_pending_channel_text(
+            student,
+            text="Одновременный ответ",
+            telegram_chat_id=2002,
+            telegram_message_id=505,
+            adapter=channel_adapter,
+        )
+    released.set()
+    assert await first_send is not None
+    await assessments.bind_my_channel_text_action(
+        student,
+        assignment_id=selected.assignment_id,
+        action_id="stale-action",
+        expected_revision=11,
+        idempotency_key="synthetic-stale-action",
+    )
+    channel_adapter.stale_next_action = True
+    with pytest.raises(AssessmentError, match="устарело"):
+        await assessments.submit_my_pending_channel_text(
+            student,
+            text="Устаревший ответ",
+            telegram_chat_id=2002,
+            telegram_message_id=506,
+            adapter=channel_adapter,
+        )
+    async with factory() as session:
+        stale_binding = await session.scalar(
+            select(StudentChannelInputBinding).where(
+                StudentChannelInputBinding.action_id == "stale-action"
+            )
+        )
+        assert stale_binding is not None and stale_binding.status == "stale"
+    with pytest.raises(AccessDeniedError, match="недоступно"):
+        await assessments.read_my_channel_state(
+            admin, assignment_id=selected.assignment_id, adapter=channel_adapter,
+        )
 
 
 async def test_publishes_immutable_context_without_contact_identity(

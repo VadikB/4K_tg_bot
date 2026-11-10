@@ -8,6 +8,12 @@ class Agent4KUnavailableError(RuntimeError):
     pass
 
 
+class Agent4KChannelActionError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 @dataclass(frozen=True)
 class CaseEnvelope:
     cycle_id: str
@@ -59,6 +65,80 @@ class EducationalProgramConnection:
     status: str
 
 
+@dataclass(frozen=True)
+class ChannelProgress:
+    status: str
+    completed: int
+    required: int
+    remaining: int
+    next_available_at: str | None
+
+
+@dataclass(frozen=True)
+class ChannelNextAction:
+    action_id: str
+    action_type: str
+    participant_payload: dict[str, object] | None
+    trace: dict[str, object] | None
+    input: dict[str, object]
+
+
+@dataclass(frozen=True)
+class EducationalChannelState:
+    assignment_ref: str
+    cycle_id: str | None
+    state: str
+    revision: int
+    next_action: ChannelNextAction | None
+    progress: ChannelProgress | None
+
+
+def _parse_channel_state(payload: dict[str, object]) -> EducationalChannelState:
+    raw_action = payload.get("next_action")
+    raw_progress = payload.get("progress")
+    next_action = None
+    if isinstance(raw_action, dict):
+        presentation = raw_action["presentation"]
+        if not isinstance(presentation, dict):
+            raise TypeError("channel presentation must be an object")
+        next_action = ChannelNextAction(
+            action_id=str(raw_action["action_id"]),
+            action_type=str(raw_action["type"]),
+            participant_payload=(
+                dict(presentation["participant_payload"])
+                if presentation.get("participant_payload") is not None
+                else None
+            ),
+            trace=(
+                dict(presentation["trace"])
+                if presentation.get("trace") is not None
+                else None
+            ),
+            input=dict(presentation["input"]),
+        )
+    progress = None
+    if isinstance(raw_progress, dict):
+        progress = ChannelProgress(
+            status=str(raw_progress["status"]),
+            completed=int(raw_progress["completed"]),
+            required=int(raw_progress["required"]),
+            remaining=int(raw_progress["remaining"]),
+            next_available_at=(
+                str(raw_progress["next_available_at"])
+                if raw_progress.get("next_available_at")
+                else None
+            ),
+        )
+    return EducationalChannelState(
+        assignment_ref=str(payload["assignment_ref"]),
+        cycle_id=str(payload["cycle_id"]) if payload.get("cycle_id") else None,
+        state=str(payload["state"]),
+        revision=int(str(payload["revision"])),
+        next_action=next_action,
+        progress=progress,
+    )
+
+
 class Agent4KPort(Protocol):
     async def resolve_participant(
         self, *, email: str, display_name: str
@@ -79,6 +159,20 @@ class Agent4KPort(Protocol):
     async def connect_educational_program(
         self, *, assignment_ref: str, program_definition_id: int, operation_id: str
     ) -> EducationalProgramConnection: ...
+
+    async def read_educational_channel_state(
+        self, *, assignment_ref: str
+    ) -> EducationalChannelState: ...
+
+    async def apply_educational_channel_action(
+        self,
+        *,
+        assignment_ref: str,
+        action_id: str,
+        expected_revision: int,
+        action_input: dict[str, object],
+        idempotency_key: str,
+    ) -> EducationalChannelState: ...
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope: ...
 
@@ -112,6 +206,24 @@ class DisabledAgent4KAdapter:
         self, *, assignment_ref: str, program_definition_id: int, operation_id: str
     ) -> EducationalProgramConnection:
         del assignment_ref, program_definition_id, operation_id
+        raise Agent4KUnavailableError("Agent4K integration is disabled")
+
+    async def read_educational_channel_state(
+        self, *, assignment_ref: str
+    ) -> EducationalChannelState:
+        del assignment_ref
+        raise Agent4KUnavailableError("Agent4K integration is disabled")
+
+    async def apply_educational_channel_action(
+        self,
+        *,
+        assignment_ref: str,
+        action_id: str,
+        expected_revision: int,
+        action_input: dict[str, object],
+        idempotency_key: str,
+    ) -> EducationalChannelState:
+        del assignment_ref, action_id, expected_revision, action_input, idempotency_key
         raise Agent4KUnavailableError("Agent4K integration is disabled")
 
     async def issue_next_case(self, *, cycle_id: str, idempotency_key: str) -> CaseEnvelope:
@@ -256,6 +368,57 @@ class HttpAgent4KAdapter:
             )
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             raise Agent4KUnavailableError("Agent4K program connection request failed") from exc
+
+    async def read_educational_channel_state(
+        self, *, assignment_ref: str
+    ) -> EducationalChannelState:
+        try:
+            response = await self._client.get(
+                f"/integration/v1/educational-assignments/{assignment_ref}/channel-state"
+            )
+            response.raise_for_status()
+            return _parse_channel_state(response.json())
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise Agent4KUnavailableError("Agent4K channel state request failed") from exc
+
+    async def apply_educational_channel_action(
+        self,
+        *,
+        assignment_ref: str,
+        action_id: str,
+        expected_revision: int,
+        action_input: dict[str, object],
+        idempotency_key: str,
+    ) -> EducationalChannelState:
+        try:
+            response = await self._client.post(
+                f"/integration/v1/educational-assignments/{assignment_ref}/channel-actions",
+                headers={"Idempotency-Key": idempotency_key},
+                json={
+                    "schema_version": 1,
+                    "action_id": action_id,
+                    "expected_revision": expected_revision,
+                    "input": action_input,
+                },
+            )
+            response.raise_for_status()
+            return _parse_channel_state(response.json())
+        except httpx.HTTPStatusError as exc:
+            try:
+                code = exc.response.json().get("detail")
+            except (ValueError, TypeError):
+                code = None
+            if exc.response.status_code in {404, 409, 422} and isinstance(code, str) and code in {
+                "EDUCATIONAL_ASSIGNMENT_NOT_FOUND",
+                "STALE_CHANNEL_REVISION",
+                "ACTION_NOT_CURRENT",
+                "IDEMPOTENCY_CONFLICT",
+                "ACTION_INPUT_INVALID",
+            }:
+                raise Agent4KChannelActionError(code) from exc
+            raise Agent4KUnavailableError("Agent4K channel action request failed") from exc
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise Agent4KUnavailableError("Agent4K channel action request failed") from exc
 
     async def close(self) -> None:
         await self._client.aclose()

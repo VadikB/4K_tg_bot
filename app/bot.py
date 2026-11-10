@@ -1,4 +1,5 @@
 import hashlib
+import json
 import unicodedata
 from datetime import date
 from typing import Any
@@ -22,9 +23,14 @@ from app.application.projects import (
     TelegramIdentity,
 )
 from app.application.roles import RoleDraft, RoleError, RoleService, parse_items
-from app.integrations.agent4k import Agent4KPort, Agent4KUnavailableError
+from app.integrations.agent4k import (
+    Agent4KPort,
+    Agent4KUnavailableError,
+    EducationalChannelState,
+)
 
 router = Router()
+TELEGRAM_TEXT_CHUNK_SIZE = 3500
 
 
 def bot_commands() -> list[BotCommand]:
@@ -33,6 +39,7 @@ def bot_commands() -> list[BotCommand]:
         BotCommand(command="help", description="Показать полный список команд"),
         BotCommand(command="new_project", description="Создать учебный проект"),
         BotCommand(command="projects", description="Показать доступные проекты"),
+        BotCommand(command="my_projects", description="Мои учебные проекты"),
         BotCommand(command="add_participant", description="Пригласить участника"),
         BotCommand(command="participants", description="Список участников проекта"),
         BotCommand(command="new_role", description="Создать CRISP-DM-роль"),
@@ -205,6 +212,7 @@ async def help_command(message: Message) -> None:
         "Доступные команды:\n"
         "/start — подключение к боту\n"
         "/projects — мои проекты\n"
+        "/my_projects — мои учебные проекты\n"
         "/new_project — создать проект (администратор)\n"
         "/add_participant — пригласить участника (администратор)\n"
         "/participants CODE — участники проекта (администратор)\n"
@@ -212,7 +220,7 @@ async def help_command(message: Message) -> None:
         "/publish_role PROJECT ROLE — опубликовать роль\n"
         "/roles PROJECT — версии ролей\n"
         "/assign_role PROJECT PARTICIPANT_ID ROLE — назначить роль\n"
-        "/my_roles — мои роли в проектах\n"
+        "/my_roles [PROJECT] — мои роли в проектах\n"
         "/new_spec — создать спецификацию оценки\n"
         "/publish_spec PROJECT — опубликовать спецификацию\n"
         "/specs PROJECT — версии спецификации\n"
@@ -221,8 +229,8 @@ async def help_command(message: Message) -> None:
         "/prepare_cycle ASSIGNMENT_ID — проверить admission и подготовку Cycle\n"
         "/admission_programs ASSIGNMENT_ID — совместимые программы 4К\n"
         "/connect_program ASSIGNMENT_ID PROGRAM_ID — подключить программу\n"
-        "/progress — прогресс оценки\n"
-        "/case — получить или продолжить кейс\n"
+        "/progress [ASSIGNMENT_ID] — канонический прогресс 4К\n"
+        "/case [ASSIGNMENT_ID] — получить или продолжить кейс\n"
         "/cancel — отменить текущий диалог"
     )
 
@@ -250,8 +258,20 @@ async def new_project(
 
 
 @router.message(Command("cancel"))
-async def cancel(message: Message, state: FSMContext) -> None:
+async def cancel(
+    message: Message, state: FSMContext, assessment_service: AssessmentService
+) -> None:
+    if message.chat.type != "private":
+        await message.answer("Этот сценарий доступен только в личном чате с ботом.")
+        return
     await state.clear()
+    try:
+        await assessment_service.cancel_my_pending_channel_input(
+            identity_from_message(message)
+        )
+    except AssessmentError as exc:
+        await message.answer(str(exc))
+        return
     await message.answer("Диалог отменён.")
 
 
@@ -360,7 +380,7 @@ async def project_dates(
     )
 
 
-@router.message(Command("projects"))
+@router.message(Command("projects", "my_projects"))
 async def projects(message: Message, project_service: ProjectService) -> None:
     await project_service.ensure_actor(identity_from_message(message))
     items = await project_service.list_projects(identity_from_message(message))
@@ -673,8 +693,13 @@ async def assign_role(
 
 
 @router.message(Command("my_roles"))
-async def my_roles(message: Message, role_service: RoleService) -> None:
+async def my_roles(
+    message: Message, command: CommandObject, role_service: RoleService
+) -> None:
     items = await role_service.list_my_roles(identity_from_message(message))
+    project_code = (command.args or "").strip().upper()
+    if project_code:
+        items = [item for item in items if item.project_code == project_code]
     if not items:
         await message.answer("Вам пока не назначены проектные роли.")
         return
@@ -880,21 +905,59 @@ async def publish_context(
 
 
 @router.message(Command("progress"))
-async def progress(message: Message, assessment_service: AssessmentService) -> None:
-    items = await assessment_service.my_progress(identity_from_message(message))
-    if not items:
-        await message.answer("Вам пока не назначена оценка.")
+async def progress(
+    message: Message,
+    command: CommandObject,
+    assessment_service: AssessmentService,
+    agent4k_adapter: Agent4KPort,
+) -> None:
+    if message.chat.type != "private":
+        await message.answer("Прогресс доступен только в личном чате с ботом.")
         return
-    await message.answer(
-        "\n\n".join(
-            f"{item.project_code}, роль {item.role_code} v{item.role_version}\n"
-            f"Пройдено: {item.completed_cases} из {item.required_cases}\n"
-            f"Осталось: {item.remaining_cases}\n"
-            f"Статус: {item.status}; Cycle 4К: "
-            f"{'создан' if item.runtime_connected else 'ожидает интеграции'}"
-            for item in items
-        )
-    )
+    identity = identity_from_message(message)
+    assignments = await assessment_service.my_channel_assignments(identity)
+    requested = (command.args or "").strip()
+    if requested:
+        if not requested.isdigit():
+            await message.answer("Формат: /progress [ASSIGNMENT_ID]")
+            return
+        assignments = [
+            item for item in assignments if item.assignment_id == int(requested)
+        ]
+    if not assignments:
+        await message.answer("Нет доступных назначений с опубликованным контекстом.")
+        return
+    cards = []
+    try:
+        for item in assignments:
+            state = await assessment_service.read_my_channel_state(
+                identity,
+                assignment_id=item.assignment_id,
+                adapter=agent4k_adapter,
+            )
+            if state.progress is None:
+                progress_text = "Прогресс пока не сформирован 4К."
+            else:
+                progress_text = (
+                    f"Пройдено: {state.progress.completed} из {state.progress.required}\n"
+                    f"Осталось: {state.progress.remaining}\n"
+                    f"Статус 4К: {state.progress.status}"
+                )
+                if state.progress.next_available_at is not None:
+                    progress_text += (
+                        f"\nСледующий кейс доступен: {state.progress.next_available_at}"
+                    )
+            cards.append(
+                f"Назначение {item.assignment_id}\n"
+                f"{item.project_code} — {item.project_name}\n"
+                f"Роль: {item.role_name} ({item.role_code}) v{item.role_version}\n"
+                f"{progress_text}\n"
+                f"Продолжить: /case {item.assignment_id}"
+            )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    await message.answer("\n\n".join(cards))
 
 
 @router.message(Command("prepare_cycle"))
@@ -1009,9 +1072,159 @@ async def connect_program(
     )
 
 
+def _channel_state_text(state: EducationalChannelState, assignment_id: int) -> str:
+    next_action = getattr(state, "next_action", None)
+    if next_action is None:
+        return "Сейчас действий не требуется. Повторите /progress позже."
+    payload = next_action.participant_payload
+    lines = [f"Следующий шаг: {next_action.action_type}"]
+    if payload:
+        lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
+    input_kind = str(next_action.input.get("kind", ""))
+    if input_kind == "text":
+        lines.append("Отправьте ответ следующим сообщением или используйте /cancel.")
+    elif input_kind == "confirm":
+        lines.append(f"Продолжить: /case {assignment_id}")
+    return "\n".join(lines)
+
+
+async def _send_channel_state(
+    message: Message, state: EducationalChannelState, assignment_id: int
+) -> None:
+    content = _channel_state_text(state, assignment_id)
+    for start in range(0, len(content), TELEGRAM_TEXT_CHUNK_SIZE):
+        await message.answer(content[start:start + TELEGRAM_TEXT_CHUNK_SIZE])
+
+
+async def _bind_next_text_action(
+    identity: TelegramIdentity,
+    *,
+    assignment_id: int,
+    state: EducationalChannelState,
+    assessment_service: AssessmentService,
+) -> None:
+    action = getattr(state, "next_action", None)
+    if action is None or action.input.get("kind") != "text":
+        return
+    key_source = (
+        f"{identity.telegram_user_id}:{assignment_id}:"
+        f"{action.action_id}:{state.revision}:text"
+    )
+    await assessment_service.bind_my_channel_text_action(
+        identity,
+        assignment_id=assignment_id,
+        action_id=action.action_id,
+        expected_revision=state.revision,
+        idempotency_key="tg-text:" + hashlib.sha256(
+            key_source.encode("utf-8")
+        ).hexdigest(),
+    )
+
+
 @router.message(Command("case"))
-async def not_connected_yet(message: Message) -> None:
-    await message.answer("Функция станет доступна после подключения проекта администратором.")
+async def case_command(
+    message: Message,
+    command: CommandObject,
+    assessment_service: AssessmentService,
+    agent4k_adapter: Agent4KPort,
+    state: FSMContext | None = None,
+) -> None:
+    if message.chat.type != "private":
+        await message.answer("Кейс доступен только в личном чате с ботом.")
+        return
+    argument = (command.args or "").strip()
+    identity = identity_from_message(message)
+    if not argument:
+        assignments = await assessment_service.my_channel_assignments(identity)
+        if not assignments:
+            await message.answer("Нет доступных назначений с опубликованным контекстом.")
+            return
+        if len(assignments) == 1:
+            assignment_id = assignments[0].assignment_id
+        else:
+            await message.answer(
+                "Выберите назначение:\n"
+                + "\n".join(
+                    f"/case {item.assignment_id} — {item.project_code}, {item.role_name}"
+                    for item in assignments
+                )
+            )
+            return
+    elif argument.isdigit():
+        assignment_id = int(argument)
+    else:
+        await message.answer("Формат: /case ASSIGNMENT_ID")
+        return
+    try:
+        channel_state = await assessment_service.read_my_channel_state(
+            identity, assignment_id=assignment_id, adapter=agent4k_adapter
+        )
+        action = channel_state.next_action
+        if action is not None and action.input.get("kind") == "confirm":
+            key_source = (
+                f"{identity.telegram_user_id}:{assignment_id}:"
+                f"{action.action_id}:{channel_state.revision}"
+            )
+            idempotency_key = "tg-case:" + hashlib.sha256(
+                key_source.encode("utf-8")
+            ).hexdigest()
+            channel_state = await assessment_service.apply_my_channel_action(
+                identity,
+                assignment_id=assignment_id,
+                action_id=action.action_id,
+                expected_revision=channel_state.revision,
+                action_input={"kind": "confirm"},
+                idempotency_key=idempotency_key,
+                adapter=agent4k_adapter,
+            )
+        await _bind_next_text_action(
+            identity,
+            assignment_id=assignment_id,
+            state=channel_state,
+            assessment_service=assessment_service,
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    await _send_channel_state(message, channel_state, assignment_id)
+
+
+@router.message(F.text)
+async def channel_text_answer(
+    message: Message,
+    assessment_service: AssessmentService,
+    agent4k_adapter: Agent4KPort,
+) -> None:
+    if message.text is None:
+        return
+    if message.chat.type != "private":
+        return
+    if message.text.startswith("/"):
+        return
+    try:
+        submitted = await assessment_service.submit_my_pending_channel_text(
+            identity_from_message(message),
+            text=message.text,
+            telegram_chat_id=message.chat.id,
+            telegram_message_id=message.message_id,
+            adapter=agent4k_adapter,
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    if submitted is None:
+        return
+    try:
+        await _bind_next_text_action(
+            identity_from_message(message),
+            assignment_id=submitted.assignment_id,
+            state=submitted.state,
+            assessment_service=assessment_service,
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+        return
+    await _send_channel_state(message, submitted.state, submitted.assignment_id)
 
 
 def build_dispatcher(

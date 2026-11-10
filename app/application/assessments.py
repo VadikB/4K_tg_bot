@@ -1,16 +1,24 @@
+import hashlib
+import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.application.projects import AccessDeniedError, TelegramIdentity, normalize_project_code
+from app.application.projects import (
+    AccessDeniedError,
+    TelegramIdentity,
+    normalize_project_code,
+)
 from app.application.roles import definition_checksum
 from app.integrations.agent4k import (
+    Agent4KChannelActionError,
     Agent4KPort,
     Agent4KUnavailableError,
+    EducationalChannelState,
     EducationalProgramConnection,
     EducationalProgramOption,
 )
@@ -27,12 +35,14 @@ from app.models import (
     ProjectRole,
     ProjectRoleVersion,
     ProjectStage,
+    StudentChannelInputBinding,
     User,
     UserSystemRole,
 )
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 RECIPIENT_POLICIES = frozenset({"participant", "instructor", "participant_and_instructor"})
+CHANNEL_SEND_LEASE = timedelta(minutes=5)
 
 
 class AssessmentError(RuntimeError):
@@ -91,6 +101,23 @@ class AssessmentContextPreparationView:
     status: str
     reasons: tuple[str, ...]
     cycle_id: str | None
+
+
+@dataclass(frozen=True)
+class StudentChannelAssignmentView:
+    assignment_id: int
+    assignment_ref: str
+    project_code: str
+    project_name: str
+    role_code: str
+    role_name: str
+    role_version: int
+
+
+@dataclass(frozen=True)
+class SubmittedChannelInput:
+    assignment_id: int
+    state: EducationalChannelState
 
 
 def validate_spec_draft(draft: AssessmentSpecDraft) -> AssessmentSpecDraft:
@@ -757,6 +784,326 @@ class AssessmentService:
                     )
                 )
             return result
+
+    async def my_channel_assignments(
+        self, identity: TelegramIdentity
+    ) -> list[StudentChannelAssignmentView]:
+        async with self._session_factory() as session:
+            user = await session.scalar(
+                select(User).where(User.telegram_user_id == identity.telegram_user_id)
+            )
+            if user is None or not user.is_active:
+                return []
+            rows = (
+                await session.execute(
+                    select(
+                        AssessmentAssignment,
+                        ProjectAssessmentContextSnapshot,
+                        Project,
+                        ProjectRole,
+                        ProjectRoleVersion,
+                    )
+                    .join(
+                        ProjectParticipant,
+                        ProjectParticipant.id == AssessmentAssignment.participant_id,
+                    )
+                    .join(Project, Project.id == ProjectParticipant.project_id)
+                    .join(
+                        ProjectRoleVersion,
+                        ProjectRoleVersion.id == AssessmentAssignment.project_role_version_id,
+                    )
+                    .join(ProjectRole, ProjectRole.id == ProjectRoleVersion.project_role_id)
+                    .join(
+                        ProjectAssessmentContextSnapshot,
+                        ProjectAssessmentContextSnapshot.assessment_assignment_id
+                        == AssessmentAssignment.id,
+                    )
+                    .where(
+                        ProjectParticipant.user_id == user.id,
+                        ProjectParticipant.status == "active",
+                        ProjectAssessmentContextSnapshot.status == "published",
+                    )
+                    .order_by(Project.code, ProjectRole.code, AssessmentAssignment.id)
+                )
+            ).all()
+            return [
+                StudentChannelAssignmentView(
+                    assignment_id=assignment.id,
+                    assignment_ref=context.assignment_ref,
+                    project_code=project.code,
+                    project_name=project.name,
+                    role_code=role.code,
+                    role_name=role.name,
+                    role_version=role_version.version,
+                )
+                for assignment, context, project, role, role_version in rows
+            ]
+
+    async def _owned_channel_assignment_ref(
+        self, identity: TelegramIdentity, *, assignment_id: int
+    ) -> str:
+        assignments = await self.my_channel_assignments(identity)
+        selected = next(
+            (item for item in assignments if item.assignment_id == assignment_id), None
+        )
+        if selected is None:
+            raise AccessDeniedError("Назначение недоступно или его контекст не опубликован.")
+        return selected.assignment_ref
+
+    async def read_my_channel_state(
+        self,
+        identity: TelegramIdentity,
+        *,
+        assignment_id: int,
+        adapter: Agent4KPort,
+    ) -> EducationalChannelState:
+        assignment_ref = await self._owned_channel_assignment_ref(
+            identity, assignment_id=assignment_id
+        )
+        try:
+            state = await adapter.read_educational_channel_state(
+                assignment_ref=assignment_ref
+            )
+        except Agent4KUnavailableError as exc:
+            raise AssessmentError("4К временно недоступен; повторите команду позже.") from exc
+        if state.assignment_ref != assignment_ref:
+            raise AssessmentError("4К вернул состояние другого назначения.")
+        return state
+
+    async def apply_my_channel_action(
+        self,
+        identity: TelegramIdentity,
+        *,
+        assignment_id: int,
+        action_id: str,
+        expected_revision: int,
+        action_input: dict[str, object],
+        idempotency_key: str,
+        adapter: Agent4KPort,
+    ) -> EducationalChannelState:
+        assignment_ref = await self._owned_channel_assignment_ref(
+            identity, assignment_id=assignment_id
+        )
+        try:
+            state = await adapter.apply_educational_channel_action(
+                assignment_ref=assignment_ref,
+                action_id=action_id,
+                expected_revision=expected_revision,
+                action_input=action_input,
+                idempotency_key=idempotency_key,
+            )
+        except Agent4KChannelActionError as exc:
+            raise AssessmentError(
+                "Действие 4К устарело или отклонено; откройте /case заново."
+            ) from exc
+        except Agent4KUnavailableError as exc:
+            raise AssessmentError("4К временно недоступен; повторите команду позже.") from exc
+        if state.assignment_ref != assignment_ref:
+            raise AssessmentError("4К вернул состояние другого назначения.")
+        return state
+
+    async def bind_my_channel_text_action(
+        self,
+        identity: TelegramIdentity,
+        *,
+        assignment_id: int,
+        action_id: str,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> None:
+        assignment_ref = await self._owned_channel_assignment_ref(
+            identity, assignment_id=assignment_id
+        )
+        async with self._session_factory.begin() as session:
+            user = await session.scalar(
+                select(User)
+                .where(User.telegram_user_id == identity.telegram_user_id)
+                .with_for_update()
+            )
+            if user is None or not user.is_active:
+                raise AccessDeniedError("Пользователь не зарегистрирован.")
+            pending = await session.scalar(
+                select(StudentChannelInputBinding)
+                .where(
+                    StudentChannelInputBinding.user_id == user.id,
+                    StudentChannelInputBinding.status.in_(("pending", "sending")),
+                )
+                .with_for_update()
+            )
+            if pending is not None:
+                same_action = (
+                    pending.assessment_assignment_id == assignment_id
+                    and pending.assignment_ref == assignment_ref
+                    and pending.action_id == action_id
+                    and pending.expected_revision == expected_revision
+                )
+                if same_action:
+                    if pending.idempotency_key != idempotency_key:
+                        raise AssessmentError("Ключ текущего действия не совпадает.")
+                    return
+                if pending.status == "sending":
+                    raise AssessmentError("Предыдущий ответ ещё отправляется; повторите позже.")
+                pending.status = "stale"
+                await session.flush()
+            session.add(StudentChannelInputBinding(
+                user_id=user.id,
+                assessment_assignment_id=assignment_id,
+                assignment_ref=assignment_ref,
+                action_id=action_id,
+                expected_revision=expected_revision,
+                input_kind="text",
+                idempotency_key=idempotency_key,
+                status="pending",
+            ))
+
+    async def submit_my_pending_channel_text(
+        self,
+        identity: TelegramIdentity,
+        *,
+        text: str,
+        telegram_chat_id: int,
+        telegram_message_id: int,
+        adapter: Agent4KPort,
+    ) -> SubmittedChannelInput | None:
+        if not text.strip():
+            raise AssessmentError("Ответ не может быть пустым.")
+        if len(text) > 4000:
+            raise AssessmentError("Ответ не должен превышать 4000 символов.")
+        payload_checksum = hashlib.sha256(
+            json.dumps(
+                {"kind": "text", "text": text},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        async with self._session_factory.begin() as session:
+            user = await session.scalar(
+                select(User).where(User.telegram_user_id == identity.telegram_user_id)
+            )
+            if user is None or not user.is_active:
+                return None
+            binding = await session.scalar(
+                select(StudentChannelInputBinding)
+                .where(
+                    StudentChannelInputBinding.user_id == user.id,
+                    StudentChannelInputBinding.status.in_(("pending", "sending")),
+                )
+                .with_for_update()
+            )
+            if binding is None:
+                return None
+            owned_ref = await session.scalar(
+                select(ProjectAssessmentContextSnapshot.assignment_ref)
+                .join(
+                    AssessmentAssignment,
+                    AssessmentAssignment.id
+                    == ProjectAssessmentContextSnapshot.assessment_assignment_id,
+                )
+                .join(
+                    ProjectParticipant,
+                    ProjectParticipant.id == AssessmentAssignment.participant_id,
+                )
+                .where(
+                    ProjectParticipant.user_id == user.id,
+                    ProjectParticipant.status == "active",
+                    ProjectAssessmentContextSnapshot.status == "published",
+                    AssessmentAssignment.id == binding.assessment_assignment_id,
+                )
+            )
+            if owned_ref != binding.assignment_ref:
+                raise AccessDeniedError("Назначение больше недоступно.")
+            if binding.payload_checksum not in (None, payload_checksum):
+                raise AssessmentError(
+                    "Ожидается повтор того же ответа. Для нового действия откройте /case."
+                )
+            if binding.telegram_chat_id not in (None, telegram_chat_id):
+                raise AssessmentError("Ответ ожидается в исходном чате.")
+            now = datetime.now(UTC)
+            if binding.status == "sending" and (
+                binding.attempt_started_at is None
+                or now - binding.attempt_started_at < CHANNEL_SEND_LEASE
+            ):
+                raise AssessmentError("Ответ уже отправляется; повторите позже.")
+            binding_id = binding.id
+            assignment_id = binding.assessment_assignment_id
+            assignment_ref = binding.assignment_ref
+            action_id = binding.action_id
+            expected_revision = binding.expected_revision
+            idempotency_key = binding.idempotency_key
+            binding.payload_checksum = payload_checksum
+            if binding.telegram_message_id is None:
+                binding.telegram_chat_id = telegram_chat_id
+                binding.telegram_message_id = telegram_message_id
+            binding.status = "sending"
+            binding.attempt_started_at = now
+
+        try:
+            state = await adapter.apply_educational_channel_action(
+                assignment_ref=assignment_ref,
+                action_id=action_id,
+                expected_revision=expected_revision,
+                action_input={"kind": "text", "text": text},
+                idempotency_key=idempotency_key,
+            )
+        except Agent4KChannelActionError as exc:
+            async with self._session_factory.begin() as session:
+                current = await session.get(StudentChannelInputBinding, binding_id)
+                if current is not None and current.status == "sending":
+                    current.status = "stale"
+            raise AssessmentError(
+                "Действие 4К устарело или отклонено; откройте /case заново."
+            ) from exc
+        except Agent4KUnavailableError as exc:
+            async with self._session_factory.begin() as session:
+                current = await session.get(StudentChannelInputBinding, binding_id)
+                if current is not None and current.status == "sending":
+                    current.status = "pending"
+            raise AssessmentError(
+                "4К временно недоступен; отправьте тот же ответ ещё раз позже."
+            ) from exc
+        if state.assignment_ref != assignment_ref:
+            async with self._session_factory.begin() as session:
+                current = await session.get(StudentChannelInputBinding, binding_id)
+                if current is not None and current.status == "sending":
+                    current.status = "stale"
+            raise AssessmentError("4К вернул состояние другого назначения.")
+
+        async with self._session_factory.begin() as session:
+            current = await session.scalar(
+                select(StudentChannelInputBinding)
+                .where(StudentChannelInputBinding.id == binding_id)
+                .with_for_update()
+            )
+            if current is None:
+                raise AssessmentError("Техническая привязка ответа потеряна.")
+            if current.status == "sending":
+                current.status = "completed"
+                current.response_revision = state.revision
+                current.completed_at = datetime.now(UTC)
+        return SubmittedChannelInput(assignment_id=assignment_id, state=state)
+
+    async def cancel_my_pending_channel_input(
+        self, identity: TelegramIdentity
+    ) -> bool:
+        async with self._session_factory.begin() as session:
+            user = await session.scalar(
+                select(User).where(User.telegram_user_id == identity.telegram_user_id)
+            )
+            if user is None:
+                return False
+            binding = await session.scalar(
+                select(StudentChannelInputBinding)
+                .where(
+                    StudentChannelInputBinding.user_id == user.id,
+                    StudentChannelInputBinding.status.in_(("pending", "sending")),
+                )
+                .with_for_update()
+            )
+            if binding is None:
+                return False
+            if binding.status == "sending":
+                raise AssessmentError("Ответ уже отправляется; проверьте /case позже.")
+            binding.status = "stale"
+            return True
 
     async def list_specs(
         self, identity: TelegramIdentity, *, project_code: str

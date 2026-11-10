@@ -8,9 +8,18 @@ from app.application.participants import ParticipantService
 from app.application.projects import ProjectService
 from app.application.roles import RoleService
 from app.bot import bot_commands, build_dispatcher
-from app.config import Settings
+from app.config import IntegrationMode, Settings
 from app.db import session_factory
-from app.integrations.agent4k import DisabledAgent4KAdapter, HttpAgent4KAdapter
+from app.integrations.agent4k import Agent4KPort, DisabledAgent4KAdapter, HttpAgent4KAdapter
+
+
+def make_agent4k_adapter(settings: Settings) -> Agent4KPort:
+    if settings.agent4k_integration_mode in {IntegrationMode.HTTP, IntegrationMode.MOCK}:
+        return HttpAgent4KAdapter(
+            base_url=settings.agent4k_api_url,
+            token=settings.agent4k_api_token,
+        )
+    return DisabledAgent4KAdapter()
 
 
 async def run() -> None:
@@ -28,14 +37,7 @@ async def run() -> None:
     )
     role_service = RoleService(session_factory(settings.database_url))
     assessment_service = AssessmentService(session_factory(settings.database_url))
-    agent4k_adapter = (
-        HttpAgent4KAdapter(
-            base_url=settings.agent4k_api_url,
-            token=settings.agent4k_api_token,
-        )
-        if settings.agent4k_integration_mode.value == "http"
-        else DisabledAgent4KAdapter()
-    )
+    agent4k_adapter = make_agent4k_adapter(settings)
     try:
         await bot.set_my_commands(bot_commands())
         await build_dispatcher(
