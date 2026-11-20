@@ -36,3 +36,16 @@ Integration/Telegram против общего `test`, CI и выпуск тре
 Вернуть прежний обработчик `/new_spec`, сохранив созданные локальные published
 snapshots и назначения без изменения. Настройка сервера возвращается к
 `AGENT4K_INTEGRATION_MODE=disabled`.
+
+## Допуск выпуска 20.11.2026
+
+Прямое поручение владельца: довести PR #5 до готовности, проверить CI, слить,
+после обновления бота включить интеграцию с test и проверить выбор в Telegram.
+branch_push=true, pr=true, merge=true, deploy=true, runtime_config=true.
+4К PR #265 выпущен: main 4f037ba5 / 2.1.46; test API с общего токена
+на сервере бота вернул HTTP 200 и 4 конфигурации, без token — 401.
+Токен настроен на обоих серверах; значение не сохраняется в документации.
+Локально Ruff/mypy PASS, pytest 91 PASS / 22 SKIP без изолированной БД;
+CI проверяет integration на отдельной bot_pytest.
+Следующие gates: CI актуального head → merge → deploy SHA → HTTP mode
+только test → проверка /new_spec в Telegram до ввода локальных параметров.
