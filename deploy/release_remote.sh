@@ -80,14 +80,17 @@ if [[ "${DEPLOY_PRECHECK_ONLY:-0}" == 1 ]]; then
 fi
 backup="$(mktemp -d "$backup_root/4k-tg-bot-release.XXXXXXXX")"
 rsync -a "$root/app/" "$backup/app/"
-sudo -n systemctl stop "$service"
+restarts_before="$(systemctl show "$service" -p NRestarts --value)"
 changed=true
+sudo -n systemctl stop "$service"
 rsync -a --delete "$stage/app/" "$root/app/"
 printf '%s\n' "$sha" > "$root/.deployed-sha"
 sudo -n systemctl start "$service"
 sleep 5
 [[ "$(systemctl show "$service" -p ActiveState --value)" == active ]]
 [[ "$(systemctl show "$service" -p SubState --value)" == running ]]
+[[ "$(systemctl show "$service" -p NRestarts --value)" == "$restarts_before" ]]
+[[ "$(systemctl show "$service" -p MainPID --value)" =~ ^[1-9][0-9]*$ ]]
 [[ "$(cat "$root/.deployed-sha")" == "$sha" ]]
 changed=false
 printf 'DEPLOYED %s\n' "$sha"
