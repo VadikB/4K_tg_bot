@@ -53,7 +53,7 @@ class EducationalContextPreparation:
     operation_id: str
     status: str
     organization_id: int
-    assignment_id: int
+    assignment_id: int | None
     assignment_ref: str
     reasons: tuple[str, ...]
     cycle_id: str | None
@@ -120,11 +120,7 @@ def _parse_channel_state(payload: dict[str, object]) -> EducationalChannelState:
                 if presentation.get("participant_payload") is not None
                 else None
             ),
-            trace=(
-                dict(presentation["trace"])
-                if presentation.get("trace") is not None
-                else None
-            ),
+            trace=(dict(presentation["trace"]) if presentation.get("trace") is not None else None),
             input=dict(presentation["input"]),
         )
     progress = None
@@ -151,6 +147,8 @@ def _parse_channel_state(payload: dict[str, object]) -> EducationalChannelState:
 
 
 class Agent4KPort(Protocol):
+    async def resolve_subject(self, *, external_subject_ref: str, organization_ref: str) -> str: ...
+
     async def list_published_assessment_configurations(
         self,
     ) -> tuple[PublishedAssessmentConfigurationOption, ...]: ...
@@ -193,6 +191,9 @@ class Agent4KPort(Protocol):
 
 
 class DisabledAgent4KAdapter:
+    async def resolve_subject(self, *, external_subject_ref: str, organization_ref: str) -> str:
+        raise Agent4KUnavailableError("Agent4K integration is disabled")
+
     async def list_published_assessment_configurations(
         self,
     ) -> tuple[PublishedAssessmentConfigurationOption, ...]:
@@ -204,9 +205,7 @@ class DisabledAgent4KAdapter:
         del email, display_name
         raise Agent4KUnavailableError("Agent4K integration is disabled")
 
-    async def get_published_role_profile(
-        self, *, version_id: int
-    ) -> PublishedRoleProfileReference:
+    async def get_published_role_profile(self, *, version_id: int) -> PublishedRoleProfileReference:
         del version_id
         raise Agent4KUnavailableError("Agent4K integration is disabled")
 
@@ -267,13 +266,29 @@ class HttpAgent4KAdapter:
             transport=transport,
         )
 
+    async def resolve_subject(self, *, external_subject_ref: str, organization_ref: str) -> str:
+        try:
+            response = await self._client.post(
+                "/integration/v1/subjects/resolve",
+                json={
+                    "source_system": "telegram_student_bot",
+                    "external_subject_ref": external_subject_ref,
+                    "organization_ref": organization_ref,
+                },
+            )
+            response.raise_for_status()
+            returned = str(response.json()["external_subject_ref"])
+            if returned != external_subject_ref:
+                raise ValueError("Subject reference mismatch")
+            return returned
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            raise Agent4KUnavailableError("Agent4K subject link failed") from exc
+
     async def list_published_assessment_configurations(
         self,
     ) -> tuple[PublishedAssessmentConfigurationOption, ...]:
         try:
-            response = await self._client.get(
-                "/integration/v1/assessment-configurations"
-            )
+            response = await self._client.get("/integration/v1/assessment-configurations")
             response.raise_for_status()
             return tuple(
                 PublishedAssessmentConfigurationOption(
@@ -298,13 +313,9 @@ class HttpAgent4KAdapter:
         del email, display_name
         raise Agent4KUnavailableError("Email-based participant identity request is disabled")
 
-    async def get_published_role_profile(
-        self, *, version_id: int
-    ) -> PublishedRoleProfileReference:
+    async def get_published_role_profile(self, *, version_id: int) -> PublishedRoleProfileReference:
         try:
-            response = await self._client.get(
-                f"/integration/v1/role-profile-versions/{version_id}"
-            )
+            response = await self._client.get(f"/integration/v1/role-profile-versions/{version_id}")
             response.raise_for_status()
             payload = response.json()
             return PublishedRoleProfileReference(
@@ -348,15 +359,17 @@ class HttpAgent4KAdapter:
                 operation_id=str(payload["operation_id"]),
                 status=str(payload["status"]),
                 organization_id=int(payload["organization_id"]),
-                assignment_id=int(payload["assignment_id"]),
+                assignment_id=(
+                    int(payload["assignment_id"])
+                    if payload.get("assignment_id") is not None
+                    else None
+                ),
                 assignment_ref=str(payload["assignment_ref"]),
                 reasons=tuple(str(value) for value in payload.get("reasons", [])),
                 cycle_id=str(payload["cycle_id"]) if payload.get("cycle_id") else None,
             )
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-            raise Agent4KUnavailableError(
-                "Agent4K educational context request failed"
-            ) from exc
+            raise Agent4KUnavailableError("Agent4K educational context request failed") from exc
 
     async def list_educational_programs(
         self, *, assignment_ref: str
@@ -442,13 +455,18 @@ class HttpAgent4KAdapter:
                 code = exc.response.json().get("detail")
             except (ValueError, TypeError):
                 code = None
-            if exc.response.status_code in {404, 409, 422} and isinstance(code, str) and code in {
-                "EDUCATIONAL_ASSIGNMENT_NOT_FOUND",
-                "STALE_CHANNEL_REVISION",
-                "ACTION_NOT_CURRENT",
-                "IDEMPOTENCY_CONFLICT",
-                "ACTION_INPUT_INVALID",
-            }:
+            if (
+                exc.response.status_code in {404, 409, 422}
+                and isinstance(code, str)
+                and code
+                in {
+                    "EDUCATIONAL_ASSIGNMENT_NOT_FOUND",
+                    "STALE_CHANNEL_REVISION",
+                    "ACTION_NOT_CURRENT",
+                    "IDEMPOTENCY_CONFLICT",
+                    "ACTION_INPUT_INVALID",
+                }
+            ):
                 raise Agent4KChannelActionError(code) from exc
             raise Agent4KUnavailableError("Agent4K channel action request failed") from exc
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:

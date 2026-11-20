@@ -1,5 +1,4 @@
 import hashlib
-import json
 import unicodedata
 from datetime import date
 from typing import Any
@@ -1405,25 +1404,134 @@ async def connect_program(
 def _channel_state_text(state: EducationalChannelState, assignment_id: int) -> str:
     next_action = getattr(state, "next_action", None)
     if next_action is None:
-        return "Сейчас действий не требуется. Повторите /progress позже."
+        return {
+            "preparing": "Готовим первый кейс. Немного позже нажмите /get_case.",
+            "awaiting_admission": (
+                "Преподаватель завершает подготовку оценки. Ваши ответы сохранены."
+            ),
+            "technical_failure": (
+                "Подготовка временно недоступна. Сообщите преподавателю; ответы сохранены."
+            ),
+            "cycle_completed": "Прохождение оценки завершено.",
+        }.get(state.state, "Сейчас действий не требуется. Повторите /progress позже.")
     payload = next_action.participant_payload
-    lines = [f"Следующий шаг: {next_action.action_type}"]
+    labels = {
+        "acquaintance_consent": "Перед началом оценки ознакомьтесь с условиями:",
+        "acquaintance_answer": "Знакомство перед оценкой:",
+        "acquaintance_confirm": "Проверьте и подтвердите свои ответы:",
+        "personalized_profile_resolve": "Ваши ответы подтверждены. Можно подготовить оценку.",
+        "case_continue": "Кейс готов. Нажмите кнопку, чтобы начать.",
+        "case_turn": "Ваш кейс:",
+    }
+    lines = [labels.get(next_action.action_type, "Следующий шаг оценки:")]
     if payload:
-        lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
+        if next_action.action_type == "acquaintance_consent":
+            for key, label in (("purpose", "Цель"), ("organizer", "Проект"),
+                               ("results_usage", "Использование результатов"),
+                               ("result_recipients", "Получатели"), ("consent_text", "Согласие")):
+                if payload.get(key):
+                    lines.append(f"{label}: {payload[key]}")
+        elif next_action.action_type == "acquaintance_answer":
+            lines.append(str(payload.get("question") or ""))
+        elif next_action.action_type == "acquaintance_confirm":
+            answers = payload.get("answers")
+            if isinstance(answers, dict):
+                lines.extend(f"Ответ {i}: {answers.get(f'answer_{i}', '')}" for i in (1, 2, 3))
+        elif next_action.action_type == "case_turn":
+            for key, label in (("title", ""), ("introduction", ""), ("text", ""),
+                               ("initial_situation", "Ситуация"), ("trigger", "Событие"),
+                               ("assessee_position", "Ваша роль"),
+                               ("participants_and_positions", "Участники ситуации"),
+                               ("assessee_task", "Ваша задача"),
+                               ("conditions_and_constraints", "Условия")):
+                if payload.get(key):
+                    lines.append((f"{label}: " if label else "") + str(payload[key]))
+            materials = payload.get("initial_materials")
+            if isinstance(materials, list):
+                for material in materials:
+                    if isinstance(material, dict):
+                        lines.extend(str(material[key]) for key in ("title", "text")
+                                     if material.get(key))
+            trace = next_action.trace or {}
+            turns = trace.get("turns")
+            if isinstance(turns, list):
+                for turn in turns:
+                    if isinstance(turn, dict) and turn.get("speaker_type") == "character":
+                        if turn.get("content_text"):
+                            lines.append(str(turn["content_text"]))
     input_kind = str(next_action.input.get("kind", ""))
     if input_kind == "text":
         lines.append("Отправьте ответ следующим сообщением или используйте /cancel.")
     elif input_kind == "confirm":
-        lines.append(f"Продолжить: /get_case {assignment_id}")
+        lines.append("Для продолжения используйте кнопку под сообщением.")
     return "\n".join(lines)
+
+
+def channel_action_token(state: EducationalChannelState) -> str:
+    action = state.next_action
+    return hashlib.sha256(
+        f"{action.action_id if action else ''}:{state.revision}".encode()
+    ).hexdigest()[:24]
 
 
 async def _send_channel_state(
     message: Message, state: EducationalChannelState, assignment_id: int
 ) -> None:
     content = _channel_state_text(state, assignment_id)
-    for start in range(0, len(content), TELEGRAM_TEXT_CHUNK_SIZE):
-        await message.answer(content[start : start + TELEGRAM_TEXT_CHUNK_SIZE])
+    markup = None
+    action = state.next_action
+    if action is not None and action.input.get("kind") == "confirm":
+        label = {
+            "acquaintance_consent": "Согласен, продолжить",
+            "acquaintance_confirm": "Подтвердить мои ответы",
+            "personalized_profile_resolve": "Подготовить оценку",
+            "case_continue": "Получить кейс",
+        }.get(action.action_type, "Продолжить")
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=label,
+                callback_data=f"ch:{assignment_id}:{channel_action_token(state)}")
+        ]])
+    chunks = list(range(0, len(content), TELEGRAM_TEXT_CHUNK_SIZE))
+    for start in chunks:
+        await message.answer(content[start : start + TELEGRAM_TEXT_CHUNK_SIZE],
+                             reply_markup=markup if start == chunks[-1] else None)
+
+
+@router.callback_query(F.data.startswith("ch:"))
+async def confirm_channel_action(
+    callback: CallbackQuery, assessment_service: AssessmentService, agent4k_adapter: Agent4KPort
+) -> None:
+    if (not isinstance(callback.message, Message) or callback.from_user is None
+            or callback.message.chat.type != "private"):
+        await callback.answer("Откройте личный чат с ботом.", show_alert=True)
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isascii() or not parts[1].isdecimal():
+        await callback.answer("Кнопка недействительна.", show_alert=True)
+        return
+    identity = TelegramIdentity(callback.from_user.id, callback.from_user.full_name,
+                                callback.from_user.username)
+    assignment_id = int(parts[1])
+    try:
+        current = await assessment_service.read_my_channel_state(
+            identity, assignment_id=assignment_id, adapter=agent4k_adapter)
+        action = current.next_action
+        if (action is None or action.input.get("kind") != "confirm"
+                or channel_action_token(current) != parts[2]):
+            await callback.answer("Шаг уже изменился. Обновите /get_case.", show_alert=True)
+            return
+        result = await assessment_service.apply_my_channel_action(
+            identity, assignment_id=assignment_id, action_id=action.action_id,
+            expected_revision=current.revision, action_input={"kind": "confirm"},
+            idempotency_key=f"tg-confirm:{assignment_id}:{parts[2]}", adapter=agent4k_adapter)
+        await _bind_next_text_action(identity, assignment_id=assignment_id, state=result,
+                                    assessment_service=assessment_service)
+    except (AssessmentError, AccessDeniedError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await _send_channel_state(callback.message, result, assignment_id)
+    await callback.answer()
 
 
 async def _bind_next_text_action(
@@ -1437,7 +1545,7 @@ async def _bind_next_text_action(
     if action is None or action.input.get("kind") != "text":
         return
     key_source = (
-        f"{identity.telegram_user_id}:{assignment_id}:{action.action_id}:{state.revision}:text"
+        f"{assignment_id}:{action.action_id}:{state.revision}:text"
     )
     await assessment_service.bind_my_channel_text_action(
         identity,
@@ -1486,22 +1594,6 @@ async def case_command(
         channel_state = await assessment_service.read_my_channel_state(
             identity, assignment_id=assignment_id, adapter=agent4k_adapter
         )
-        action = channel_state.next_action
-        if action is not None and action.input.get("kind") == "confirm":
-            key_source = (
-                f"{identity.telegram_user_id}:{assignment_id}:"
-                f"{action.action_id}:{channel_state.revision}"
-            )
-            idempotency_key = "tg-case:" + hashlib.sha256(key_source.encode("utf-8")).hexdigest()
-            channel_state = await assessment_service.apply_my_channel_action(
-                identity,
-                assignment_id=assignment_id,
-                action_id=action.action_id,
-                expected_revision=channel_state.revision,
-                action_input={"kind": "confirm"},
-                idempotency_key=idempotency_key,
-                adapter=agent4k_adapter,
-            )
         await _bind_next_text_action(
             identity,
             assignment_id=assignment_id,

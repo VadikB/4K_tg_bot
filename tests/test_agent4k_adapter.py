@@ -319,3 +319,40 @@ async def test_http_adapter_preserves_channel_conflict(code: str) -> None:
     finally:
         await adapter.close()
     assert caught.value.code == code
+
+
+async def test_subject_resolve_sends_only_opaque_key_and_rejects_rebinding() -> None:
+    subject = "c5b105c7-3b49-4202-8c76-7bdd708b951b"
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert request.url.path == "/integration/v1/subjects/resolve"
+        assert payload == {
+            "source_system": "telegram_student_bot",
+            "external_subject_ref": subject,
+            "organization_ref": "organization:17",
+        }
+        calls.append(payload)
+        return httpx.Response(
+            200, json={"external_subject_ref": subject if len(calls) == 1 else "different"}
+        )
+
+    adapter = HttpAgent4KAdapter(
+        base_url="https://agent4k.example",
+        token="synthetic",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert (
+            await adapter.resolve_subject(
+                external_subject_ref=subject, organization_ref="organization:17"
+            )
+            == subject
+        )
+        with pytest.raises(Agent4KUnavailableError):
+            await adapter.resolve_subject(
+                external_subject_ref=subject, organization_ref="organization:17"
+            )
+    finally:
+        await adapter.close()

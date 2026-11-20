@@ -1465,3 +1465,59 @@ async def test_published_assessment_spec_is_immutable(database_url: str) -> None
             spec = await session.scalar(select(ProjectAssessmentSpec))
             assert spec is not None
             spec.snapshot_json = {"changed": True}
+
+
+async def test_opaque_subject_timeout_reuses_persisted_random_key(database_url: str) -> None:
+    _, admin, student, participant_id = await assessment_fixture(database_url)
+    factory = session_factory(database_url)
+    participants = ParticipantService(factory, invitation_ttl_hours=168)
+    calls = []
+
+    class OpaqueAdapter:
+        async def resolve_subject(self, **payload):
+            calls.append(payload)
+            if len(calls) == 1:
+                raise Agent4KUnavailableError("timeout")
+            return payload["external_subject_ref"]
+
+    adapter = OpaqueAdapter()
+    with pytest.raises(Agent4KUnavailableError):
+        await participants.link_assessment_subject(
+            admin,
+            project_code="TBA-2026-G01",
+            participant_id=participant_id,
+            organization_ref="organization:17",
+            adapter=adapter,
+        )
+    async with factory() as session:
+        participant = await session.get(ProjectParticipant, participant_id)
+        saved_key = participant.external_subject_ref
+        assert saved_key and participant.agent4k_linked_at is None
+        assert participant.agent4k_user_id is None
+    from uuid import UUID
+
+    assert UUID(saved_key).version == 4
+    with pytest.raises(AccessDeniedError):
+        await participants.link_assessment_subject(
+            student,
+            project_code="TBA-2026-G01",
+            participant_id=participant_id,
+            organization_ref="organization:17",
+            adapter=adapter,
+        )
+    for _ in range(2):
+        assert (
+            await participants.link_assessment_subject(
+                admin,
+                project_code="TBA-2026-G01",
+                participant_id=participant_id,
+                organization_ref="organization:17",
+                adapter=adapter,
+            )
+            == saved_key
+        )
+    assert calls == [{"external_subject_ref": saved_key, "organization_ref": "organization:17"}] * 2
+    async with factory() as session:
+        participant = await session.get(ProjectParticipant, participant_id)
+        assert participant.agent4k_linked_at is not None
+        assert participant.agent4k_user_id is None

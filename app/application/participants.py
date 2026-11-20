@@ -2,6 +2,7 @@ import hashlib
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -103,6 +104,74 @@ class ParticipantService:
             raise ValueError("invitation_ttl_hours must be between 1 and 720")
         self._session_factory = session_factory
         self._invitation_ttl = timedelta(hours=invitation_ttl_hours)
+
+    async def link_assessment_subject(
+        self,
+        identity: TelegramIdentity,
+        *,
+        project_code: str,
+        participant_id: int,
+        organization_ref: str,
+        adapter: Agent4KPort,
+    ) -> str:
+        if not organization_ref:
+            raise ParticipantIdentityNotReadyError("Не настроен тестовый контур 4К.")
+        async with self._session_factory.begin() as session:
+            actor = await _require_admin(session, identity)
+            project = await session.scalar(
+                select(Project).where(
+                    Project.code == normalize_project_code(project_code),
+                    Project.created_by_user_id == actor.id,
+                )
+            )
+            if project is None:
+                raise AccessDeniedError("Проект недоступен.")
+            participant = await session.scalar(
+                select(ProjectParticipant)
+                .where(
+                    ProjectParticipant.id == participant_id,
+                    ProjectParticipant.project_id == project.id,
+                    ProjectParticipant.status == "active",
+                )
+                .with_for_update()
+            )
+            if participant is None:
+                raise AccessDeniedError("Участник недоступен.")
+            existing_subject = participant.external_subject_ref is not None
+            if not existing_subject:
+                participant.external_subject_ref = str(uuid4())
+            subject = participant.external_subject_ref
+            assert subject is not None
+            if existing_subject and participant.agent4k_linked_at is not None:
+                return subject
+        # Commit the random key BEFORE HTTP; a timeout always reuses this key.
+        await adapter.resolve_subject(
+            external_subject_ref=subject, organization_ref=organization_ref
+        )
+        async with self._session_factory.begin() as session:
+            await _require_admin(session, identity)
+            project = await session.scalar(select(Project).where(
+                Project.code == normalize_project_code(project_code),
+                Project.created_by_user_id == actor.id))
+            participant = await session.scalar(select(ProjectParticipant).where(
+                ProjectParticipant.id == participant_id,
+                ProjectParticipant.status == "active").with_for_update())
+            if (project is None or participant is None or participant.project_id != project.id
+                    or participant.external_subject_ref != subject):
+                raise ParticipantIdentityNotReadyError("Связь участника изменилась.")
+            if participant.agent4k_linked_at is None:
+                participant.agent4k_linked_at = datetime.now(UTC)
+                session.add(
+                    AuditEvent(
+                        actor_user_id=actor.id,
+                        project_id=project.id,
+                        entity_type="project_participant",
+                        entity_id=str(participant_id),
+                        action="opaque_subject_linked",
+                        payload_json={"organization_ref": organization_ref},
+                    )
+                )
+        return subject
 
     async def feedback_recipient(
         self, identity: TelegramIdentity, *, project_code: str
@@ -372,7 +441,13 @@ class ParticipantService:
                     telegram_connected=item.user_id is not None,
                     telegram_id_configured=item.invited_telegram_user_id is not None,
                     email_configured=item.email is not None,
-                    agent4k_connected=item.agent4k_user_id is not None,
+                    agent4k_connected=(
+                        item.agent4k_user_id is not None
+                        or (
+                            item.external_subject_ref is not None
+                            and item.agent4k_linked_at is not None
+                        )
+                    ),
                 )
                 for item in rows
             ]

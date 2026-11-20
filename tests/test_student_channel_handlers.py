@@ -32,10 +32,38 @@ def channel_state(*, revision: int = 3, text_action: bool = True) -> Educational
             input={"kind": "text" if text_action else "confirm"},
         ),
         progress=ChannelProgress(
-            status="active", completed=0, required=3, remaining=3,
+            status="active",
+            completed=0,
+            required=3,
+            remaining=3,
             next_available_at=None,
         ),
     )
+
+
+def test_channel_renders_public_text_without_transport_metadata() -> None:
+    from app.bot import _channel_state_text
+
+    state = channel_state()
+    action = state.next_action
+    assert action is not None
+    consent = replace(state, next_action=replace(
+        action, action_type="acquaintance_consent", input={"kind": "confirm"},
+        participant_payload={"purpose": "Цель проекта", "consent_text": "Текст согласия",
+                             "consent_version": 1},
+    ))
+    text = _channel_state_text(consent, 7)
+    assert "Цель: Цель проекта" in text and "Текст согласия" in text
+    assert "consent_version" not in text and "acquaintance_consent" not in text
+    case = replace(state, next_action=replace(action,
+        participant_payload={"title": "Кейс", "introduction": "Описание ситуации",
+                             "case_id": "technical-id"},
+        trace={"private": "hidden", "turns": [
+            {"speaker_type": "character", "content_text": "Реплика персонажа"}]},
+    ))
+    text = _channel_state_text(case, 7)
+    assert "Описание ситуации" in text and "Реплика персонажа" in text
+    assert "technical-id" not in text and "hidden" not in text
 
 
 class FakeMessage:
@@ -44,12 +72,18 @@ class FakeMessage:
         self.message_id = message_id
         self.chat = SimpleNamespace(id=2002, type="private")
         self.from_user = SimpleNamespace(
-            id=2002, username="student", full_name="Студент",
+            id=2002,
+            username="student",
+            full_name="Студент",
         )
         self.answers: list[str] = []
 
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, **kwargs) -> None:
         self.answers.append(text)
+        self.markup = kwargs.get("reply_markup")
+
+    async def edit_reply_markup(self, **kwargs) -> None:
+        self.markup = kwargs.get("reply_markup")
 
 
 class FakeChannelService:
@@ -74,8 +108,7 @@ def test_get_case_appears_in_telegram_commands_and_uses_case_handler() -> None:
     assert "get_case" in [item.command for item in bot_commands()]
     handler = next(item for item in router.message.handlers if item.callback is case_command)
     assert any(
-        isinstance(item.callback, Command)
-        and item.callback.commands == ("case", "get_case")
+        isinstance(item.callback, Command) and item.callback.commands == ("case", "get_case")
         for item in handler.filters
     )
 
@@ -101,7 +134,9 @@ async def test_text_handler_forwards_answer_transiently() -> None:
     message = FakeMessage("Мой ответ", message_id=501)
     service = FakeChannelService()
     await channel_text_answer(  # type: ignore[arg-type]
-        message, service, SimpleNamespace(),
+        message,
+        service,
+        SimpleNamespace(),
     )
     assert service.submissions[0]["text"] == "Мой ответ"
     assert service.submissions[0]["telegram_chat_id"] == 2002
@@ -116,7 +151,10 @@ async def test_case_rejects_group_chat_before_reading_4k() -> None:
     message.chat.type = "group"
     service = FakeChannelService()
     await case_command(  # type: ignore[arg-type]
-        message, SimpleNamespace(args="7"), service, SimpleNamespace(),
+        message,
+        SimpleNamespace(args="7"),
+        service,
+        SimpleNamespace(),
     )
     assert message.answers == ["Кейс доступен только в личном чате с ботом."]
     assert service.read_count == 0
@@ -128,31 +166,45 @@ async def test_case_sends_long_participant_payload_in_telegram_sized_messages() 
         async def read_my_channel_state(self, *args: object, **kwargs: object):
             state = await super().read_my_channel_state(*args, **kwargs)
             assert state.next_action is not None
-            return replace(state, next_action=replace(
-                state.next_action, participant_payload={"text": "X" * 8000},
-            ))
+            return replace(
+                state,
+                next_action=replace(
+                    state.next_action,
+                    participant_payload={"text": "X" * 8000},
+                ),
+            )
 
     message = FakeMessage("/case 7")
     service = LongPayloadService()
     await case_command(  # type: ignore[arg-type]
-        message, SimpleNamespace(args="7"), service, SimpleNamespace(),
+        message,
+        SimpleNamespace(args="7"),
+        service,
+        SimpleNamespace(),
     )
     assert len(message.answers) > 1
     assert all(len(part) <= 3500 for part in message.answers)
     assert sum(part.count("X") for part in message.answers) == 8000
 
 
-async def test_fake_acquaintance_profile_and_first_case_flow() -> None:
+async def test_fake_acquaintance_profile_and_first_case_flow(monkeypatch) -> None:
+    import app.bot as bot_module
+
+    monkeypatch.setattr(bot_module, "Message", FakeMessage)
+
     def action_state(revision: int, action_type: str, input_kind: str):
         state = channel_state(revision=revision)
         assert state.next_action is not None
-        return replace(state, next_action=replace(
-            state.next_action,
-            action_id=f"action-{revision}",
-            action_type=action_type,
-            participant_payload={"step": action_type},
-            input={"kind": input_kind},
-        ))
+        return replace(
+            state,
+            next_action=replace(
+                state.next_action,
+                action_id=f"action-{revision}",
+                action_type=action_type,
+                participant_payload={"step": action_type},
+                input={"kind": input_kind},
+            ),
+        )
 
     class FlowService(FakeChannelService):
         def __init__(self) -> None:
@@ -162,15 +214,19 @@ async def test_fake_acquaintance_profile_and_first_case_flow() -> None:
                 action_state(1, "acquaintance_answer", "text"),
                 action_state(2, "acquaintance_answer", "text"),
                 action_state(3, "acquaintance_answer", "text"),
-                action_state(4, "personalized_profile_resolve", "confirm"),
-                action_state(5, "case_continue", "confirm"),
-                action_state(6, "case_turn", "text"),
+                action_state(4, "acquaintance_confirm", "confirm"),
+                action_state(5, "personalized_profile_resolve", "confirm"),
+                action_state(6, "case_continue", "confirm"),
+                action_state(7, "case_turn", "text"),
                 replace(
-                    channel_state(revision=7),
+                    channel_state(revision=8),
                     state="waiting",
                     next_action=None,
                     progress=ChannelProgress(
-                        status="active", completed=1, required=3, remaining=2,
+                        status="active",
+                        completed=1,
+                        required=3,
+                        remaining=2,
                         next_available_at="2026-11-11T12:00:00+03:00",
                     ),
                 ),
@@ -182,15 +238,17 @@ async def test_fake_acquaintance_profile_and_first_case_flow() -> None:
             return self.states[self.position]
 
         async def my_channel_assignments(self, *args: object, **kwargs: object):
-            return [StudentChannelAssignmentView(
-                assignment_id=7,
-                assignment_ref="edu:4k-tg-bot:p1:a7",
-                project_code="SYNTH-DEMAND",
-                project_name="Прогноз спроса",
-                role_code="business_analyst",
-                role_name="Бизнес-аналитик",
-                role_version=1,
-            )]
+            return [
+                StudentChannelAssignmentView(
+                    assignment_id=7,
+                    assignment_ref="edu:4k-tg-bot:p1:a7",
+                    project_code="SYNTH-DEMAND",
+                    project_name="Прогноз спроса",
+                    role_code="business_analyst",
+                    role_name="Бизнес-аналитик",
+                    role_version=1,
+                )
+            ]
 
         async def apply_my_channel_action(self, *args: object, **kwargs: object):
             self.applied.append(kwargs)
@@ -204,29 +262,58 @@ async def test_fake_acquaintance_profile_and_first_case_flow() -> None:
 
     service = FlowService()
     outputs: list[str] = []
-    for step in range(8):
-        if step in (1, 2, 3, 6):
+    for step in range(9):
+        if step in (1, 2, 3, 7):
             message = FakeMessage(f"Ответ {step}", message_id=500 + step)
             await channel_text_answer(  # type: ignore[arg-type]
-                message, service, SimpleNamespace(),
+                message,
+                service,
+                SimpleNamespace(),
             )
         else:
             message = FakeMessage("/case 7")
             await case_command(  # type: ignore[arg-type]
-                message, SimpleNamespace(args="7"), service, SimpleNamespace(),
+                message,
+                SimpleNamespace(args="7"),
+                service,
+                SimpleNamespace(),
             )
+            current = await service.read_my_channel_state()
+            if current.next_action and current.next_action.input.get("kind") == "confirm":
+                before = len(service.applied)
+                assert message.markup is not None
+                # Reading /case never accepts consent; only an actual callback does.
+                button_data = message.markup.inline_keyboard[0][0].callback_data
+
+                class Callback:
+                    data = button_data
+                    from_user = message.from_user
+
+                    async def answer(self, *args, **kwargs):
+                        pass
+
+                callback = Callback()
+                callback.message = message
+                await bot_module.confirm_channel_action(callback, service, SimpleNamespace())
+                assert len(service.applied) == before + 1
         outputs.extend(message.answers)
-    assert service.position == 7
-    assert [item["expected_revision"] for item in service.bindings] == [1, 2, 3, 6]
+    assert service.position == 8
+    assert [item["expected_revision"] for item in service.bindings] == [1, 2, 3, 7]
     assert [item["action_input"] for item in service.applied if "action_input" in item] == [
-        {"kind": "confirm"}, {"kind": "confirm"}, {"kind": "confirm"},
+        {"kind": "confirm"},
+        {"kind": "confirm"},
+        {"kind": "confirm"},
+        {"kind": "confirm"},
     ]
-    assert any("Продолжить: /get_case 7" in item for item in outputs)
-    assert any("case_turn" in item for item in outputs)
+    assert any("кнопку под сообщением" in item for item in outputs)
+    assert any("Ваш кейс:" in item for item in outputs)
     assert all("must not be rendered" not in item for item in outputs)
     progress_message = FakeMessage("/progress 7")
     await progress(  # type: ignore[arg-type]
-        progress_message, SimpleNamespace(args="7"), service, SimpleNamespace(),
+        progress_message,
+        SimpleNamespace(args="7"),
+        service,
+        SimpleNamespace(),
     )
     assert "Пройдено: 1 из 3" in progress_message.answers[0]
     assert "Следующий кейс доступен: 2026-11-11T12:00:00+03:00" in progress_message.answers[0]

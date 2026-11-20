@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/4k_tg_bot"
     agent4k_api_url: str = ""
     agent4k_api_token: str = ""
+    agent4k_organization_ref: str = ""
     agent4k_integration_mode: IntegrationMode = IntegrationMode.DISABLED
     bootstrap_admin_telegram_ids: tuple[int, ...] = ()
     superadmin_telegram_ids: tuple[int, ...] = ()
