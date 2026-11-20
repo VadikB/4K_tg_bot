@@ -451,8 +451,12 @@ class AssessmentService:
             role = await session.get(ProjectRole, role_version.project_role_id)
             if project is None or role is None or spec.project_id != project.id:
                 raise AssessmentError("Контекст назначения противоречив.")
-            if participant.agent4k_user_id is None:
-                raise AssessmentError("Участник ещё не связан с пользователем 4К.")
+            if participant.agent4k_user_id is None and (
+                participant.external_subject_ref is None or participant.agent4k_linked_at is None
+            ):
+                raise AssessmentError(
+                    "Непрозрачная связь участника с контуром оценки ещё не настроена."
+                )
             if not project.course_external_id:
                 raise AssessmentError("У проекта отсутствует идентификатор курса.")
             if spec.status != "published":
@@ -518,7 +522,9 @@ class AssessmentService:
                 },
                 "participant": {
                     "local_ref": f"participant:{participant.id}",
-                    "agent4k_user_id": participant.agent4k_user_id,
+                    **({"external_subject_ref": participant.external_subject_ref}
+                       if participant.external_subject_ref else
+                       {"agent4k_user_id": participant.agent4k_user_id}),
                 },
                 "role": {
                     "code": role.code,

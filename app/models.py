@@ -79,6 +79,7 @@ class ProjectStage(Base, TimestampMixin):
 class ProjectParticipant(Base, TimestampMixin):
     __tablename__ = "project_participants"
     __table_args__ = (
+        UniqueConstraint("external_subject_ref", name="uq_participant_external_subject"),
         UniqueConstraint("project_id", "user_id", name="uq_project_participant"),
         UniqueConstraint("project_id", "email", name="uq_project_participant_email"),
         UniqueConstraint(
@@ -93,7 +94,8 @@ class ProjectParticipant(Base, TimestampMixin):
             name="ck_project_participant_identity",
         ),
         CheckConstraint(
-            "agent4k_user_id IS NOT NULL OR agent4k_linked_at IS NULL",
+            "agent4k_user_id IS NOT NULL OR external_subject_ref IS NOT NULL "
+            "OR agent4k_linked_at IS NULL",
             name="ck_project_participant_agent4k_link",
         ),
     )
@@ -105,6 +107,7 @@ class ProjectParticipant(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(255))
     invited_telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
     email: Mapped[str | None] = mapped_column(String(320))
+    external_subject_ref: Mapped[str | None] = mapped_column(String(36))
     agent4k_user_id: Mapped[int | None] = mapped_column(BigInteger)
     agent4k_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), default="invited")
@@ -283,7 +286,7 @@ class AssessmentContextPreparation(Base):
     )
     external_operation_id: Mapped[str] = mapped_column(String(255), unique=True)
     external_organization_id: Mapped[int] = mapped_column(BigInteger)
-    external_assignment_id: Mapped[int] = mapped_column(BigInteger)
+    external_assignment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str] = mapped_column(String(32))
     reasons_json: Mapped[list[str]] = mapped_column(JSONB, default=list)
     external_cycle_id: Mapped[str | None] = mapped_column(String(255))
