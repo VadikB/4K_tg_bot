@@ -39,6 +39,21 @@ class Settings(BaseSettings):
         if self.agent4k_integration_mode is IntegrationMode.HTTP:
             if not self.agent4k_api_url or not self.agent4k_api_token:
                 raise ValueError("HTTP integration requires AGENT4K_API_URL and AGENT4K_API_TOKEN")
+            if self.app_env == "production":
+                endpoint = urlsplit(self.agent4k_api_url)
+                if (
+                    endpoint.scheme != "https"
+                    or endpoint.hostname != "test.4k-assistant.ru"
+                    or endpoint.port not in {None, 443}
+                    or endpoint.username is not None
+                    or endpoint.password is not None
+                    or endpoint.path not in {"", "/"}
+                    or endpoint.query
+                    or endpoint.fragment
+                ):
+                    raise ValueError(
+                        "Production bot HTTP integration must target the 4K test stand"
+                    )
         if self.agent4k_integration_mode is IntegrationMode.MOCK:
             if self.app_env not in {"local", "test"}:
                 raise ValueError("Mock integration is allowed only in local and test environments")

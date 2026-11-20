@@ -38,6 +38,17 @@ class PublishedRoleProfileReference:
 
 
 @dataclass(frozen=True)
+class PublishedAssessmentConfigurationOption:
+    id: int
+    ref: str
+    code: str
+    name: str
+    methodology_ref: str
+    reference_checksum: str
+    is_default: bool
+
+
+@dataclass(frozen=True)
 class EducationalContextPreparation:
     operation_id: str
     status: str
@@ -140,6 +151,10 @@ def _parse_channel_state(payload: dict[str, object]) -> EducationalChannelState:
 
 
 class Agent4KPort(Protocol):
+    async def list_published_assessment_configurations(
+        self,
+    ) -> tuple[PublishedAssessmentConfigurationOption, ...]: ...
+
     async def resolve_participant(
         self, *, email: str, display_name: str
     ) -> ParticipantIdentityLink: ...
@@ -178,6 +193,11 @@ class Agent4KPort(Protocol):
 
 
 class DisabledAgent4KAdapter:
+    async def list_published_assessment_configurations(
+        self,
+    ) -> tuple[PublishedAssessmentConfigurationOption, ...]:
+        raise Agent4KUnavailableError("Agent4K integration is disabled")
+
     async def resolve_participant(
         self, *, email: str, display_name: str
     ) -> ParticipantIdentityLink:
@@ -246,6 +266,31 @@ class HttpAgent4KAdapter:
             timeout=timeout_seconds,
             transport=transport,
         )
+
+    async def list_published_assessment_configurations(
+        self,
+    ) -> tuple[PublishedAssessmentConfigurationOption, ...]:
+        try:
+            response = await self._client.get(
+                "/integration/v1/assessment-configurations"
+            )
+            response.raise_for_status()
+            return tuple(
+                PublishedAssessmentConfigurationOption(
+                    id=int(item["id"]),
+                    ref=str(item["ref"]),
+                    code=str(item["code"]),
+                    name=str(item["name"]),
+                    methodology_ref=str(item["methodology_ref"]),
+                    reference_checksum=str(item["reference_checksum"]),
+                    is_default=bool(item["is_default"]),
+                )
+                for item in response.json()
+            )
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise Agent4KUnavailableError(
+                "Agent4K assessment configuration request failed"
+            ) from exc
 
     async def resolve_participant(
         self, *, email: str, display_name: str

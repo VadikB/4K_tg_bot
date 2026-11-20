@@ -24,6 +24,27 @@ def test_http_mode_requires_endpoint_and_token() -> None:
         settings.validate_runtime()
 
 
+def test_production_bot_http_integration_targets_only_4k_test() -> None:
+    for url in (
+        "https://pilot.4k-assistant.ru",
+        "http://test.4k-assistant.ru",
+        "https://test.4k-assistant.ru/other",
+    ):
+        settings = Settings(
+            app_env="production", telegram_bot_token="token",
+            agent4k_integration_mode=IntegrationMode.HTTP,
+            agent4k_api_url=url, agent4k_api_token="synthetic-token",
+        )
+        with pytest.raises(ValueError, match="test stand"):
+            settings.validate_runtime()
+    Settings(
+        app_env="production", telegram_bot_token="token",
+        agent4k_integration_mode=IntegrationMode.HTTP,
+        agent4k_api_url="https://test.4k-assistant.ru",
+        agent4k_api_token="synthetic-token",
+    ).validate_runtime()
+
+
 def test_mock_mode_is_blocked_in_production() -> None:
     settings = Settings(
         app_env="production",

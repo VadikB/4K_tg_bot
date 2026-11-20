@@ -17,6 +17,47 @@ async def test_disabled_adapter_fails_closed() -> None:
         await adapter.issue_next_case(cycle_id="cycle-1", idempotency_key="request-1")
 
 
+async def test_http_adapter_lists_published_assessment_configurations() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/integration/v1/assessment-configurations"
+        assert request.headers["Authorization"] == "Bearer synthetic-service-token"
+        return httpx.Response(200, json=[{
+            "id": 17,
+            "ref": "agent4k:configuration:17",
+            "code": "standard",
+            "name": "Стандартная",
+            "methodology_ref": "agent4k:methodology:m1:v2",
+            "reference_checksum": "a" * 64,
+            "is_default": True,
+        }])
+
+    adapter = HttpAgent4KAdapter(
+        base_url="https://agent4k.example",
+        token="synthetic-service-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        options = await adapter.list_published_assessment_configurations()
+    finally:
+        await adapter.close()
+    assert len(options) == 1
+    assert options[0].id == 17
+    assert options[0].reference_checksum == "a" * 64
+
+
+async def test_http_adapter_configuration_options_fail_closed() -> None:
+    adapter = HttpAgent4KAdapter(
+        base_url="https://agent4k.example",
+        token="synthetic-service-token",
+        transport=httpx.MockTransport(lambda _: httpx.Response(503)),
+    )
+    try:
+        with pytest.raises(Agent4KUnavailableError, match="configuration"):
+            await adapter.list_published_assessment_configurations()
+    finally:
+        await adapter.close()
+
+
 async def test_http_adapter_never_sends_participant_email() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError(f"unexpected HTTP request: {request.url.path}")

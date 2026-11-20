@@ -60,7 +60,7 @@ def bot_commands() -> list[BotCommand]:
         BotCommand(command="map_role", description="Связать роль с профилем оценки 4К"),
         BotCommand(command="assign_role", description="Назначить роль участнику"),
         BotCommand(command="my_roles", description="Мои роли в проектах"),
-        BotCommand(command="new_spec", description="Создать спецификацию оценки"),
+        BotCommand(command="new_spec", description="Настроить оценку проекта"),
         BotCommand(command="specs", description="Список спецификаций проекта"),
         BotCommand(command="publish_spec", description="Опубликовать спецификацию"),
         BotCommand(command="assign_assessment", description="Назначить оценку"),
@@ -133,9 +133,7 @@ def choice_keyboard(
 
 class AssessmentSpecWizard(StatesGroup):
     project_code = State()
-    configuration_ref = State()
-    configuration_checksum = State()
-    methodology_ref = State()
+    configuration = State()
     required_case_count = State()
     period = State()
     recipient_policy = State()
@@ -283,7 +281,7 @@ async def help_command(message: Message) -> None:
         "/map_role PROJECT ROLE PROFILE_ID CHECKSUM — сопоставить с 4К\n"
         "/assign_role — выбрать проект, участника и роль\n"
         "/my_roles [PROJECT] — мои роли в проектах\n"
-        "/new_spec — создать спецификацию оценки\n"
+        "/new_spec — выбрать конфигурацию 4К и настроить оценку проекта\n"
         "/publish_spec PROJECT — опубликовать спецификацию\n"
         "/specs PROJECT — версии спецификации\n"
         "/assign_assessment PROJECT PARTICIPANT_ID ROLE — назначить оценку\n"
@@ -967,41 +965,111 @@ async def my_roles(message: Message, command: CommandObject, role_service: RoleS
 
 @router.message(Command("new_spec"))
 async def new_spec(message: Message, state: FSMContext, project_service: ProjectService) -> None:
+    if message.chat.type != "private":
+        await message.answer("Настройка оценки доступна в личном чате с ботом.")
+        return
     _, is_admin = await project_service.ensure_actor(identity_from_message(message))
     if not is_admin:
-        await message.answer("Создавать спецификации может только администратор.")
+        await message.answer("Настраивать оценку может только администратор.")
+        return
+    projects = await project_service.list_projects(identity_from_message(message))
+    if not projects:
+        await message.answer("Доступных проектов пока нет.")
         return
     await state.clear()
+    token = uuid4().hex[:12]
+    items = [(f"{item.code} — {item.name}", item.code) for item in projects]
+    await state.update_data(token=token, projects=items)
     await state.set_state(AssessmentSpecWizard.project_code)
-    await message.answer("Код проекта:")
+    await message.answer(
+        "Выберите проект для настройки оценки:",
+        reply_markup=choice_keyboard(items, token, "project", prefix="sp"),
+    )
 
 
-@router.message(AssessmentSpecWizard.project_code, F.text)
-async def spec_project(message: Message, state: FSMContext) -> None:
-    await state.update_data(project_code=message.text)
-    await state.set_state(AssessmentSpecWizard.configuration_ref)
-    await message.answer("Точная ссылка/ID опубликованной AssessmentConfiguration 4К:")
-
-
-@router.message(AssessmentSpecWizard.configuration_ref, F.text)
-async def spec_configuration(message: Message, state: FSMContext) -> None:
-    await state.update_data(assessment_configuration_ref=message.text)
-    await state.set_state(AssessmentSpecWizard.configuration_checksum)
-    await message.answer("SHA-256 этой конфигурации (64 hex-символа):")
-
-
-@router.message(AssessmentSpecWizard.configuration_checksum, F.text)
-async def spec_configuration_checksum(message: Message, state: FSMContext) -> None:
-    await state.update_data(assessment_configuration_checksum=message.text)
-    await state.set_state(AssessmentSpecWizard.methodology_ref)
-    await message.answer("Ссылка/версия методологии:")
-
-
-@router.message(AssessmentSpecWizard.methodology_ref, F.text)
-async def spec_methodology(message: Message, state: FSMContext) -> None:
-    await state.update_data(methodology_ref=message.text)
-    await state.set_state(AssessmentSpecWizard.required_case_count)
-    await message.answer("Сколько кейсов должен пройти участник?")
+@router.callback_query(F.data.startswith("sp:"))
+async def spec_choice(
+    callback: CallbackQuery,
+    state: FSMContext,
+    project_service: ProjectService,
+    agent4k_adapter: Agent4KPort,
+) -> None:
+    if not isinstance(callback.message, Message) or callback.from_user is None:
+        await callback.answer("Откройте личный чат с ботом.", show_alert=True)
+        return
+    parts = (callback.data or "").split(":")
+    data = await state.get_data()
+    current = await state.get_state()
+    stages = {
+        "project": AssessmentSpecWizard.project_code.state,
+        "configuration": AssessmentSpecWizard.configuration.state,
+    }
+    if (
+        len(parts) != 4
+        or parts[1] != data.get("token")
+        or current != stages.get(parts[2])
+    ):
+        await callback.answer("Список устарел. Начните заново: /new_spec", show_alert=True)
+        return
+    stage, selected = parts[2], parts[3]
+    items = data.get("projects" if stage == "project" else "configurations")
+    if not isinstance(items, list):
+        await callback.answer("Список устарел. Начните заново: /new_spec", show_alert=True)
+        return
+    if selected.startswith("p") and selected[1:].isascii() and selected[1:].isdecimal():
+        page = int(selected[1:])
+        if page * CHOICE_PAGE_SIZE >= len(items):
+            await callback.answer("Страница недоступна.", show_alert=True)
+            return
+        await callback.message.edit_reply_markup(
+            reply_markup=choice_keyboard(items, data["token"], stage, page, prefix="sp")
+        )
+        await callback.answer()
+        return
+    if not selected.isascii() or not selected.isdecimal() or int(selected) >= len(items):
+        await callback.answer("Пункт недоступен.", show_alert=True)
+        return
+    value = items[int(selected)][1]
+    identity = TelegramIdentity(
+        telegram_user_id=callback.from_user.id,
+        telegram_username=callback.from_user.username,
+        display_name=callback.from_user.full_name,
+    )
+    try:
+        if stage == "project":
+            projects = await project_service.list_projects(identity)
+            if value not in {item.code for item in projects}:
+                raise AccessDeniedError("Проект больше недоступен.")
+            options = await agent4k_adapter.list_published_assessment_configurations()
+            if not options:
+                await state.clear()
+                await callback.message.answer("В 4К пока нет опубликованных конфигураций оценки.")
+            else:
+                choices = [(f"{item.code} — {item.name}", str(item.id)) for item in options]
+                await state.update_data(project_code=value, configurations=choices)
+                await state.set_state(AssessmentSpecWizard.configuration)
+                await callback.message.answer(
+                    "Выберите доступную конфигурацию 4К:",
+                    reply_markup=choice_keyboard(
+                        choices, data["token"], "configuration", prefix="sp"
+                    ),
+                )
+        else:
+            options = await agent4k_adapter.list_published_assessment_configurations()
+            option = next((item for item in options if str(item.id) == value), None)
+            if option is None:
+                raise AssessmentError("Конфигурация больше не доступна в 4К.")
+            await state.update_data(
+                assessment_configuration_ref=option.ref,
+                assessment_configuration_checksum=option.reference_checksum,
+                methodology_ref=option.methodology_ref,
+            )
+            await state.set_state(AssessmentSpecWizard.required_case_count)
+            await callback.message.answer("Сколько кейсов должен пройти участник?")
+    except (AccessDeniedError, AssessmentError, Agent4KUnavailableError) as exc:
+        await state.clear()
+        await callback.message.answer(f"Настройка оценки не выполнена: {exc}")
+    await callback.answer()
 
 
 @router.message(AssessmentSpecWizard.required_case_count, F.text)
