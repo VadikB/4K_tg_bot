@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import app.bot as bot_module
 from app.application.roles import RoleAssignmentResult, RoleView
-from app.bot import assign_role, assign_role_choice, assign_role_keyboard
+from app.bot import ParticipantWizard, assign_role, assign_role_choice, choice_keyboard
 
 
 class FakeState:
@@ -84,11 +84,14 @@ async def test_assign_role_selects_project_participant_and_role(monkeypatch) -> 
     monkeypatch.setattr(bot_module, "Message", FakeMessage)
     message = FakeMessage()
     state = FakeState()
+    state.current = ParticipantWizard.display_name.state
+    state.data = {"project_code": "/assign_role"}
     projects = FakeProjects()
     participants = FakeParticipants()
     roles = FakeRoles()
     await assign_role(message, SimpleNamespace(args=None), state, projects, roles)
     token = state.data["token"]
+    assert "project_code" not in state.data
     assert message.answers[-1][0] == "Выберите код проекта:"
     assert message.answers[-1][1].inline_keyboard[0][0].text == "PRJ-1 — Первый проект"
 
@@ -166,8 +169,8 @@ async def test_removed_participant_is_rechecked_before_role_selection(monkeypatc
 
 def test_assign_role_keyboard_pages_large_lists() -> None:
     items = [(f"Проект {index}", str(index)) for index in range(9)]
-    first = assign_role_keyboard(items, "token", "project")
+    first = choice_keyboard(items, "token", "project")
     assert len(first.inline_keyboard) == 9
     assert first.inline_keyboard[-1][0].callback_data == "ar:token:project:p1"
-    second = assign_role_keyboard(items, "token", "project", 1)
+    second = choice_keyboard(items, "token", "project", 1)
     assert second.inline_keyboard[0][0].callback_data == "ar:token:project:8"
