@@ -1545,7 +1545,7 @@ async def _bind_next_text_action(
     if action is None or action.input.get("kind") != "text":
         return
     key_source = (
-        f"{identity.telegram_user_id}:{assignment_id}:{action.action_id}:{state.revision}:text"
+        f"{assignment_id}:{action.action_id}:{state.revision}:text"
     )
     await assessment_service.bind_my_channel_text_action(
         identity,
