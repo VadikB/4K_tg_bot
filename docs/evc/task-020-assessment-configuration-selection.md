@@ -13,7 +13,7 @@ snapshot и назначение оценки сохраняют прежние 
 - Base bot commit: `35f70034d93baeedb3dff698f59c8ae2dd970986`.
 - 4К: TGBOT-02/04 и новый read-only
   `GET /integration/v1/assessment-configurations` в ветке
-  `codex/assessment-options-test` на базе `bc63a8ee`.
+  `codex/assessment-options-main`, commit `5a26057e`, на базе 4К `main`.
 - Решения владельца 20.11.2026: показывать список опубликованных конфигураций;
   не менять спецификации 4К; число кейсов, период и получателей оставить
   локальными настройками проекта; обращаться только к стенду `test`.
