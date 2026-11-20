@@ -16,7 +16,10 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from aiogram.utils.deep_linking import create_start_link
 
@@ -331,7 +334,7 @@ async def cancel(
     except AssessmentError as exc:
         await message.answer(str(exc))
         return
-    await message.answer("Диалог отменён.")
+    await message.answer("Диалог отменён.", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(ProjectWizard.name, F.text)
@@ -1092,7 +1095,17 @@ async def spec_period(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(AssessmentSpecWizard.recipient_policy)
     await message.answer(
-        "Получатели результата: participant, instructor или participant_and_instructor:"
+        "Кому отправить результат оценки?\n"
+        "Выберите: участнику, преподавателю или обоим.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Участнику")],
+                [KeyboardButton(text="Преподавателю")],
+                [KeyboardButton(text="Участнику и преподавателю")],
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
     )
 
 
@@ -1110,7 +1123,11 @@ async def spec_recipient_policy(
             required_case_count=int(str(data["required_case_count"])),
             available_from=data["available_from"],
             available_until=data["available_until"],
-            result_recipient_policy=(message.text or "").strip(),
+            result_recipient_policy={
+                "Участнику": "participant",
+                "Преподавателю": "instructor",
+                "Участнику и преподавателю": "participant_and_instructor",
+            }.get((message.text or "").strip(), (message.text or "").strip()),
         )
         result = await assessment_service.create_spec_draft(
             identity_from_message(message), project_code=project_code, draft=draft
@@ -1124,7 +1141,8 @@ async def spec_recipient_policy(
         f"Кейсов: {result.required_case_count}\n"
         f"Checksum: {result.checksum}\n"
         f"Runtime: {result.runtime_admission}\n"
-        f"Опубликовать локальный snapshot: /publish_spec {project_code}"
+        f"Опубликовать локальный snapshot: /publish_spec {project_code}",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 

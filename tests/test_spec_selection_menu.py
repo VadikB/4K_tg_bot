@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 import app.bot as bot_module
 from app.bot import AssessmentSpecWizard, new_spec, spec_choice
 from app.integrations.agent4k import (
@@ -139,3 +141,42 @@ async def test_unavailable_4k_aborts_configuration_selection(monkeypatch) -> Non
     )
     assert state.current is None
     assert "4К недоступен" in message.answers[-1][0]
+
+
+async def test_recipient_step_displays_russian_buttons():
+    message = FakeMessage()
+    message.text = "-"
+    state = FakeState()
+    await bot_module.spec_period(message, state)
+    assert state.current == AssessmentSpecWizard.recipient_policy.state
+    keyboard = message.answers[-1][1].keyboard
+    assert [row[0].text for row in keyboard] == [
+        "Участнику", "Преподавателю", "Участнику и преподавателю"
+    ]
+
+
+@pytest.mark.parametrize("label,policy", [
+    ("Участнику", "participant"),
+    ("Преподавателю", "instructor"),
+    ("Участнику и преподавателю", "participant_and_instructor"),
+    ("participant", "participant"),
+])
+async def test_recipient_button_preserves_service_contract(label, policy):
+    message = FakeMessage()
+    message.text = label
+    state = FakeState()
+    state.data = dict(project_code="PRJ-1", assessment_configuration_ref="cfg",
+        assessment_configuration_checksum="a" * 64, methodology_ref="m1",
+        required_case_count="5", available_from=None, available_until=None)
+
+    class Service:
+        async def create_spec_draft(self, identity, *, project_code, draft):
+            assert identity.telegram_user_id == 11
+            assert project_code == "PRJ-1"
+            assert draft.result_recipient_policy == policy
+            return SimpleNamespace(version=1, required_case_count=5,
+                checksum="b" * 64, runtime_admission="pending")
+
+    await bot_module.spec_recipient_policy(message, state, Service())
+    assert state.data == {}
+    assert message.answers[-1][1].remove_keyboard
