@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "fixture_version": "synthetic-semester/1.0",
+  "status": "qa_only",
+  "organization": {
+    "external_id": "synthetic:tba:2026-s1",
+    "course": "Технологии бизнес-аналитики",
+    "cohort": "SYNTHETIC-2026-S1"
+  },
+  "scenarios": [
+    {
+      "id": "single-role-first-case",
+      "purpose": "Технически доказать путь от учебного назначения до первой AS без реального студента",
+      "projects": [{"ref": "project-demand", "name": "Прогнозирование спроса"}],
+      "participants": [{"ref": "student-01", "synthetic": true}],
+      "assignments": [{"ref": "assignment-demand-ba", "project_ref": "project-demand", "participant_ref": "student-01", "role_code": "business_analyst"}],
+      "script": ["questionnaire_confirmed", "consent_accepted", "answer_1", "answer_2", "answer_3_confirmed", "profile_resolved", "cycle_prepared", "first_as_presented"],
+      "required_assertions": ["one_assignment", "one_profile", "one_cycle", "first_as_reached", "forbidden_identity_absent"]
+    },
+    {
+      "id": "multi-project-multi-role-isolation",
+      "purpose": "Доказать изоляцию назначений одного участника между проектами и ролями",
+      "projects": [
+        {"ref": "project-demand", "name": "Прогнозирование спроса"},
+        {"ref": "project-segmentation", "name": "Сегментация клиентов"}
+      ],
+      "participants": [{"ref": "student-01", "synthetic": true}],
+      "assignments": [
+        {"ref": "assignment-demand-ba", "project_ref": "project-demand", "participant_ref": "student-01", "role_code": "business_analyst"},
+        {"ref": "assignment-demand-data", "project_ref": "project-demand", "participant_ref": "student-01", "role_code": "data_researcher"},
+        {"ref": "assignment-segmentation-ml", "project_ref": "project-segmentation", "participant_ref": "student-01", "role_code": "ml_engineer"}
+      ],
+      "script": ["all_assignments_admitted", "independent_acquaintance", "independent_profiles", "independent_cycles", "independent_progress"],
+      "required_assertions": ["assignment_refs_unique", "profile_scope_isolated", "cycle_scope_isolated", "progress_scope_isolated", "forbidden_identity_absent"]
+    }
+  ],
+  "limitations": ["Не доказывает методологическую валидность оценки", "Не доказывает качество LLM", "Не заменяет пилот с реальными участниками"]
+}

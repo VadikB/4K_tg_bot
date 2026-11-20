@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "source": "ТГ бот для студентов.md#Детализация таблицы ролей в проекте по методологии CRISP-DM",
+  "status": "frozen_for_semester_qa",
+  "roles": [
+    {
+      "code": "business_analyst",
+      "name": "Бизнес-аналитик",
+      "crisp_dm_phases": ["business_understanding", "deployment"],
+      "responsibilities": ["Формулирует проблему, цель, KPI, критерии успеха и ограничения", "Переводит бизнес-требования в аналитическую постановку", "Оценивает бизнес-эффект и организует внедрение"],
+      "interacts_with": ["customer", "data_researcher", "ml_engineer", "validator", "product_team"]
+    },
+    {
+      "code": "data_researcher",
+      "name": "Исследователь данных",
+      "crisp_dm_phases": ["data_understanding", "business_understanding", "data_preparation"],
+      "responsibilities": ["Изучает структуру, качество, объём и доступность данных", "Ищет зависимости, выбросы и закономерности", "Формулирует и проверяет гипотезы"],
+      "interacts_with": ["business_analyst", "data_engineer", "ml_engineer"]
+    },
+    {
+      "code": "data_engineer",
+      "name": "Инженер данных",
+      "crisp_dm_phases": ["data_preparation", "data_understanding", "deployment"],
+      "responsibilities": ["Собирает, очищает, кодирует и объединяет данные", "Строит ETL/ELT-пайплайны и витрины", "Версионирует данные и обеспечивает воспроизводимость"],
+      "interacts_with": ["data_researcher", "ml_engineer", "validator", "devops"]
+    },
+    {
+      "code": "ml_engineer",
+      "name": "ML-инженер",
+      "crisp_dm_phases": ["modeling", "data_preparation", "deployment"],
+      "responsibilities": ["Выбирает метод, формирует признаки и обучает модель", "Документирует эксперименты и качество модели", "Готовит модель к эксплуатации и мониторингу"],
+      "interacts_with": ["data_engineer", "data_researcher", "validator", "business_analyst"]
+    },
+    {
+      "code": "validator",
+      "name": "Валидатор",
+      "crisp_dm_phases": ["evaluation", "modeling", "deployment"],
+      "responsibilities": ["Независимо оценивает бизнес- и ML-метрики", "Проверяет устойчивость, интерпретируемость, утечки и воспроизводимость", "Фиксирует решение о продвижении или доработке"],
+      "interacts_with": ["ml_engineer", "business_analyst", "data_engineer", "customer"]
+    }
+  ]
+}
