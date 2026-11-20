@@ -1419,7 +1419,7 @@ def _channel_state_text(state: EducationalChannelState, assignment_id: int) -> s
         "acquaintance_consent": "Перед началом оценки ознакомьтесь с условиями:",
         "acquaintance_answer": "Знакомство перед оценкой:",
         "acquaintance_confirm": "Проверьте и подтвердите свои ответы:",
-        "personalized_profile_resolve": "Ваши ответы сохранены. Подтвердите подготовку оценки.",
+        "personalized_profile_resolve": "Ваши ответы подтверждены. Можно подготовить оценку.",
         "case_continue": "Кейс готов. Нажмите кнопку, чтобы начать.",
         "case_turn": "Ваш кейс:",
     }
@@ -1484,7 +1484,7 @@ async def _send_channel_state(
         label = {
             "acquaintance_consent": "Согласен, продолжить",
             "acquaintance_confirm": "Подтвердить мои ответы",
-            "personalized_profile_resolve": "Подтвердить профиль и подготовить оценку",
+            "personalized_profile_resolve": "Подготовить оценку",
             "case_continue": "Получить кейс",
         }.get(action.action_type, "Продолжить")
         markup = InlineKeyboardMarkup(inline_keyboard=[[
