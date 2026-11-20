@@ -250,19 +250,8 @@ class HttpAgent4KAdapter:
     async def resolve_participant(
         self, *, email: str, display_name: str
     ) -> ParticipantIdentityLink:
-        try:
-            response = await self._client.post(
-                "/integration/v1/participants/resolve",
-                json={"email": email, "display_name": display_name},
-            )
-            response.raise_for_status()
-            payload = response.json()
-            return ParticipantIdentityLink(
-                agent4k_user_id=int(payload["agent4k_user_id"]),
-                status=str(payload["status"]),
-            )
-        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-            raise Agent4KUnavailableError("Agent4K participant identity request failed") from exc
+        del email, display_name
+        raise Agent4KUnavailableError("Email-based participant identity request is disabled")
 
     async def get_published_role_profile(
         self, *, version_id: int

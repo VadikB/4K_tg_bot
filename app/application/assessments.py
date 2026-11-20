@@ -35,6 +35,7 @@ from app.models import (
     ProjectRole,
     ProjectRoleVersion,
     ProjectStage,
+    RoleProfileBinding,
     StudentChannelInputBinding,
     User,
     UserSystemRole,
@@ -318,6 +319,10 @@ class AssessmentService:
         participant_id: int,
         role_code: str,
     ) -> AssessmentAssignmentView:
+        from app.role_catalog import load_role_catalog
+
+        if load_role_catalog().find(role_code) is None:
+            raise AssessmentError("Для этой роли оценка в текущем семестре не предусмотрена.")
         async with self._session_factory.begin() as session:
             actor = await _require_admin(session, identity)
             project = await _project(session, project_code)
@@ -347,6 +352,18 @@ class AssessmentService:
             )
             if role_version is None:
                 raise AssessmentError("Участнику не назначена опубликованная версия роли.")
+            binding = await session.scalar(
+                select(RoleProfileBinding)
+                .where(RoleProfileBinding.project_role_version_id == role_version.id)
+                .order_by(RoleProfileBinding.version.desc())
+            )
+            if binding is None and (
+                role_version.agent4k_role_profile_version_id is None
+                or role_version.agent4k_role_profile_checksum is None
+            ):
+                raise AssessmentError(
+                    "Оценка для этой роли ожидает сопоставления с опубликованной ролью 4К."
+                )
             assignment = await session.scalar(
                 select(AssessmentAssignment).where(
                     AssessmentAssignment.participant_id == participant.id,
@@ -359,6 +376,7 @@ class AssessmentService:
                     participant_id=participant.id,
                     project_assessment_spec_id=spec.id,
                     project_role_version_id=role_version.id,
+                    role_profile_binding_id=binding.id if binding else None,
                     status="assigned",
                     assigned_by_user_id=actor.id,
                 )
@@ -441,10 +459,26 @@ class AssessmentService:
                 raise AssessmentError("Спецификация оценки не опубликована.")
             if role_version.status != "published":
                 raise AssessmentError("Версия проектной роли не опубликована.")
-            if (
-                role_version.agent4k_role_profile_version_id is None
-                or role_version.agent4k_role_profile_checksum is None
-            ):
+            binding = (
+                await session.get(RoleProfileBinding, assignment.role_profile_binding_id)
+                if assignment.role_profile_binding_id is not None
+                else None
+            )
+            if assignment.role_profile_binding_id is not None and binding is None:
+                raise AssessmentError("Закреплённое сопоставление роли не найдено.")
+            if binding is not None and binding.project_role_version_id != role_version.id:
+                raise AssessmentError("Сопоставление роли противоречит назначению.")
+            role_profile_id = (
+                binding.agent4k_role_profile_version_id
+                if binding is not None
+                else role_version.agent4k_role_profile_version_id
+            )
+            role_profile_checksum = (
+                binding.agent4k_role_profile_checksum
+                if binding is not None
+                else role_version.agent4k_role_profile_checksum
+            )
+            if role_profile_id is None or role_profile_checksum is None:
                 raise AssessmentError("Проектная роль не связана с RoleProfileVersion 4К.")
 
             stages = list(
@@ -492,12 +526,8 @@ class AssessmentService:
                     "project_role_version": role_version.version,
                     "project_role_checksum": role_version.checksum,
                     "definition": dict(role_version.definition_json),
-                    "agent4k_role_profile_version_id": (
-                        role_version.agent4k_role_profile_version_id
-                    ),
-                    "agent4k_role_profile_checksum": (
-                        role_version.agent4k_role_profile_checksum
-                    ),
+                    "agent4k_role_profile_version_id": role_profile_id,
+                    "agent4k_role_profile_checksum": role_profile_checksum,
                 },
                 "assessment_spec": {
                     "version": spec.version,

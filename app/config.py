@@ -22,10 +22,11 @@ class Settings(BaseSettings):
     agent4k_api_token: str = ""
     agent4k_integration_mode: IntegrationMode = IntegrationMode.DISABLED
     bootstrap_admin_telegram_ids: tuple[int, ...] = ()
+    superadmin_telegram_ids: tuple[int, ...] = ()
     default_project_timezone: str = "Europe/Moscow"
     invitation_ttl_hours: int = 168
 
-    @field_validator("bootstrap_admin_telegram_ids", mode="before")
+    @field_validator("bootstrap_admin_telegram_ids", "superadmin_telegram_ids", mode="before")
     @classmethod
     def parse_admin_ids(cls, value: object) -> object:
         if isinstance(value, str):

@@ -1,11 +1,15 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
+from aiogram.filters import Command
+
 from app.application.assessments import StudentChannelAssignmentView, SubmittedChannelInput
 from app.bot import (
+    bot_commands,
     case_command,
     channel_text_answer,
     progress,
+    router,
 )
 from app.integrations.agent4k import (
     ChannelNextAction,
@@ -66,8 +70,18 @@ class FakeChannelService:
         return SubmittedChannelInput(assignment_id=7, state=channel_state(revision=4))
 
 
+def test_get_case_appears_in_telegram_commands_and_uses_case_handler() -> None:
+    assert "get_case" in [item.command for item in bot_commands()]
+    handler = next(item for item in router.message.handlers if item.callback is case_command)
+    assert any(
+        isinstance(item.callback, Command)
+        and item.callback.commands == ("case", "get_case")
+        for item in handler.filters
+    )
+
+
 async def test_case_binds_text_action_without_rendering_trace() -> None:
-    message = FakeMessage("/case 7")
+    message = FakeMessage("/get_case 7")
     service = FakeChannelService()
     await case_command(  # type: ignore[arg-type]
         message,
@@ -207,7 +221,7 @@ async def test_fake_acquaintance_profile_and_first_case_flow() -> None:
     assert [item["action_input"] for item in service.applied if "action_input" in item] == [
         {"kind": "confirm"}, {"kind": "confirm"}, {"kind": "confirm"},
     ]
-    assert any("Продолжить: /case 7" in item for item in outputs)
+    assert any("Продолжить: /get_case 7" in item for item in outputs)
     assert any("case_turn" in item for item in outputs)
     assert all("must not be rendered" not in item for item in outputs)
     progress_message = FakeMessage("/progress 7")

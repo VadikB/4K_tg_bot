@@ -30,6 +30,7 @@ async def run() -> None:
     project_service = ProjectService(
         session_factory(settings.database_url),
         bootstrap_admin_ids=settings.bootstrap_admin_telegram_ids,
+        superadmin_ids=settings.superadmin_telegram_ids,
     )
     participant_service = ParticipantService(
         session_factory(settings.database_url),

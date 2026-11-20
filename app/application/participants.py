@@ -3,7 +3,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.application.projects import AccessDeniedError, TelegramIdentity, normalize_project_code
@@ -22,6 +22,10 @@ class InvitationError(RuntimeError):
     pass
 
 
+class ParticipantIdentityNotReadyError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class InvitationSecret:
     participant_id: int
@@ -36,6 +40,7 @@ class ParticipantView:
     display_name: str
     status: str
     telegram_connected: bool
+    telegram_id_configured: bool
     email_configured: bool
     agent4k_connected: bool
 
@@ -47,26 +52,28 @@ class ParticipantLinkView:
     created: bool
 
 
+@dataclass(frozen=True)
+class FeedbackRecipient:
+    project_code: str
+    participant_name: str
+    teacher_telegram_user_id: int
+
+
 def normalize_email(value: str) -> str:
     email = value.strip().lower()
-    if len(email) > 320 or email.count("@") != 1:
-        raise ValueError("Введите корректный email участника.")
-    local, domain = email.split("@", 1)
-    invalid_domain = (
-        not domain
-        or "." not in domain
-        or domain.startswith(".")
-        or domain.endswith(".")
-    )
-    if not local or invalid_domain:
-        raise ValueError("Введите корректный email участника.")
-    if any(character.isspace() for character in email):
-        raise ValueError("Введите корректный email участника.")
+    if not email or len(email) > 320:
+        raise ValueError("Email участника должен содержать от 1 до 320 символов.")
     return email
 
 
 def invitation_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def validate_telegram_user_id(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value < 2**63:
+        raise ValueError("Введите положительный числовой Telegram ID участника.")
+    return value
 
 
 async def _load_actor(session: AsyncSession, identity: TelegramIdentity) -> User:
@@ -96,6 +103,29 @@ class ParticipantService:
             raise ValueError("invitation_ttl_hours must be between 1 and 720")
         self._session_factory = session_factory
         self._invitation_ttl = timedelta(hours=invitation_ttl_hours)
+
+    async def feedback_recipient(
+        self, identity: TelegramIdentity, *, project_code: str
+    ) -> FeedbackRecipient:
+        async with self._session_factory() as session:
+            actor = await _load_actor(session, identity)
+            row = await session.execute(
+                select(Project.code, ProjectParticipant.display_name, User.telegram_user_id)
+                .join(ProjectParticipant, ProjectParticipant.project_id == Project.id)
+                .join(User, User.id == Project.created_by_user_id)
+                .join(UserSystemRole, UserSystemRole.user_id == User.id)
+                .where(
+                    Project.code == normalize_project_code(project_code),
+                    ProjectParticipant.user_id == actor.id,
+                    ProjectParticipant.status == "active",
+                    User.is_active,
+                    UserSystemRole.role == "admin",
+                )
+            )
+            recipient = row.one_or_none()
+            if recipient is None:
+                raise AccessDeniedError("Проект недоступен для отправки отзыва.")
+            return FeedbackRecipient(*recipient)
 
     async def create_invitation(
         self,
@@ -160,6 +190,89 @@ class ParticipantService:
             )
             return InvitationSecret(participant.id, project.code, token, expires_at)
 
+    async def create_telegram_invitation(
+        self,
+        identity: TelegramIdentity,
+        *,
+        project_code: str,
+        participant_name: str,
+        participant_email: str,
+        telegram_user_id: int,
+        now: datetime | None = None,
+    ) -> InvitationSecret:
+        name = participant_name.strip()
+        if not name or len(name) > 255:
+            raise ValueError("ФИО участника должно содержать от 1 до 255 символов.")
+        email = normalize_email(participant_email)
+        invited_id = validate_telegram_user_id(telegram_user_id)
+        current = now or datetime.now(UTC)
+        if current.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        token = secrets.token_urlsafe(32)
+        async with self._session_factory.begin() as session:
+            actor = await _require_admin(session, identity)
+            project = await session.scalar(
+                select(Project).where(Project.code == normalize_project_code(project_code))
+            )
+            if project is None or project.created_by_user_id != actor.id:
+                raise AccessDeniedError("Проект не найден среди ваших проектов.")
+            existing_email = await session.scalar(
+                select(ProjectParticipant.id).where(
+                    ProjectParticipant.project_id == project.id,
+                    ProjectParticipant.email == email,
+                )
+            )
+            if existing_email is not None:
+                raise ValueError("Участник с таким email уже добавлен в проект.")
+            existing = await session.scalar(
+                select(ProjectParticipant.id)
+                .outerjoin(User, User.id == ProjectParticipant.user_id)
+                .where(
+                    ProjectParticipant.project_id == project.id,
+                    or_(
+                        ProjectParticipant.invited_telegram_user_id == invited_id,
+                        User.telegram_user_id == invited_id,
+                    ),
+                )
+            )
+            if existing is not None:
+                raise ValueError("Участник с таким Telegram ID уже добавлен в проект.")
+            participant = ProjectParticipant(
+                project_id=project.id,
+                user_id=None,
+                display_name=name,
+                invited_telegram_user_id=invited_id,
+                email=email,
+                status="invited",
+            )
+            session.add(participant)
+            await session.flush()
+            session.add(
+                Invitation(
+                    project_participant_id=participant.id,
+                    token_hash=invitation_token_hash(token),
+                    expires_at=current + self._invitation_ttl,
+                    created_by_user_id=actor.id,
+                )
+            )
+            session.add(
+                AuditEvent(
+                    actor_user_id=actor.id,
+                    project_id=project.id,
+                    entity_type="project_participant",
+                    entity_id=str(participant.id),
+                    action="invited",
+                    payload_json={
+                        "status": "invited",
+                        "telegram_id_configured": True,
+                        "email_configured": True,
+                    },
+                )
+            )
+            return InvitationSecret(
+                participant.id, project.code, token, current + self._invitation_ttl
+            )
+
     async def accept_invitation(
         self,
         identity: TelegramIdentity,
@@ -189,6 +302,11 @@ class ParticipantService:
             )
             if participant is None or participant.status != "invited":
                 raise InvitationError("Приглашение больше не активно.")
+            if (
+                participant.invited_telegram_user_id is not None
+                and participant.invited_telegram_user_id != identity.telegram_user_id
+            ):
+                raise InvitationError("Приглашение предназначено другому Telegram ID.")
             user = await session.scalar(
                 select(User).where(User.telegram_user_id == identity.telegram_user_id)
             )
@@ -211,7 +329,8 @@ class ParticipantService:
             if existing is not None and existing != participant.id:
                 raise InvitationError("Вы уже являетесь участником этого проекта.")
             participant.user_id = user.id
-            participant.display_name = identity.display_name
+            if participant.invited_telegram_user_id is None:
+                participant.display_name = identity.display_name
             participant.status = "active"
             participant.joined_at = current
             invitation.used_at = current
@@ -251,6 +370,7 @@ class ParticipantService:
                     display_name=item.display_name,
                     status=item.status,
                     telegram_connected=item.user_id is not None,
+                    telegram_id_configured=item.invited_telegram_user_id is not None,
                     email_configured=item.email is not None,
                     agent4k_connected=item.agent4k_user_id is not None,
                 )
@@ -265,6 +385,7 @@ class ParticipantService:
         adapter: Agent4KPort,
         now: datetime | None = None,
     ) -> ParticipantLinkView:
+        del adapter
         current = now or datetime.now(UTC)
         if current.tzinfo is None:
             raise ValueError("now must be timezone-aware")
@@ -288,44 +409,6 @@ class ParticipantService:
                     participant.agent4k_user_id,
                     False,
                 )
-            if participant.email is None:
-                raise ValueError("Для участника не задан email.")
-            participant_id = participant.id
-            email = participant.email
-            display_name = participant.display_name
-
-        resolved = await adapter.resolve_participant(email=email, display_name=display_name)
-
-        async with self._session_factory.begin() as session:
-            participant = await session.get(
-                ProjectParticipant, participant_id, with_for_update=True
-            )
-            if participant is None or participant.user_id is None:
-                raise AccessDeniedError("Участник проекта больше не активен.")
-            user = await _load_actor(session, identity)
-            if participant.user_id != user.id or participant.email != email:
-                raise AccessDeniedError("Данные участника изменились; повторите связывание.")
-            if participant.agent4k_user_id is not None:
-                if participant.agent4k_user_id != resolved.agent4k_user_id:
-                    raise RuntimeError("Участник уже связан с другим пользователем 4К.")
-                return ParticipantLinkView(participant.id, participant.agent4k_user_id, False)
-            participant.agent4k_user_id = resolved.agent4k_user_id
-            participant.agent4k_linked_at = current
-            session.add(
-                AuditEvent(
-                    actor_user_id=user.id,
-                    project_id=participant.project_id,
-                    entity_type="project_participant",
-                    entity_id=str(participant.id),
-                    action="agent4k_identity_linked",
-                    payload_json={
-                        "agent4k_user_id": resolved.agent4k_user_id,
-                        "status": resolved.status,
-                    },
-                )
-            )
-            return ParticipantLinkView(
-                participant.id,
-                resolved.agent4k_user_id,
-                resolved.status == "provisioned",
+            raise ParticipantIdentityNotReadyError(
+                "Связь с 4К по непрозрачному ключу ещё не подключена."
             )

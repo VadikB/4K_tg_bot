@@ -9,8 +9,10 @@ def test_admin_ids_are_parsed_from_csv() -> None:
     settings = Settings(
         telegram_bot_token="token",
         bootstrap_admin_telegram_ids="10, 20",  # type: ignore[arg-type]
+        superadmin_telegram_ids="30, 40",  # type: ignore[arg-type]
     )
     assert settings.bootstrap_admin_telegram_ids == (10, 20)
+    assert settings.superadmin_telegram_ids == (30, 40)
 
 
 def test_http_mode_requires_endpoint_and_token() -> None:

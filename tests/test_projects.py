@@ -102,4 +102,7 @@ def test_bot_menu_contains_participant_and_role_lists() -> None:
     assert len(commands) == len(set(commands))
     assert "participants" in commands
     assert "roles" in commands
+    assert "map_role" in commands
+    assert "new_role" not in commands
+    assert "publish_role" not in commands
 

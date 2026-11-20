@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "crisp-dm-student-roles",
+  "version": "2026.1",
+  "status": "frozen_for_semester",
+  "owner": "course_owner",
+  "source": "ТГ бот для студентов.md#Детализация таблицы ролей в проекте по методологии CRISP-DM",
+  "source_sha256": "bc72e53d67675cfcedcec36d2376d3f6540dbced99723c50f99f2dc3e1159776",
+  "artifact": "roles.json",
+  "sha256": "5356305d2be95b78abad28e80ca676ea482c6e129c7719f5c44b1ba6a3a0eec8"
+}

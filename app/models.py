@@ -81,6 +81,13 @@ class ProjectParticipant(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("project_id", "user_id", name="uq_project_participant"),
         UniqueConstraint("project_id", "email", name="uq_project_participant_email"),
+        UniqueConstraint(
+            "project_id", "invited_telegram_user_id", name="uq_project_participant_invited_tg_id"
+        ),
+        CheckConstraint(
+            "invited_telegram_user_id IS NULL OR invited_telegram_user_id > 0",
+            name="ck_project_participant_invited_tg_id",
+        ),
         CheckConstraint(
             "user_id IS NOT NULL OR status = 'invited'",
             name="ck_project_participant_identity",
@@ -96,6 +103,7 @@ class ProjectParticipant(Base, TimestampMixin):
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
     )
     display_name: Mapped[str] = mapped_column(String(255))
+    invited_telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
     email: Mapped[str | None] = mapped_column(String(320))
     agent4k_user_id: Mapped[int | None] = mapped_column(BigInteger)
     agent4k_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -136,6 +144,34 @@ class ProjectRoleVersion(Base, TimestampMixin):
     agent4k_role_profile_checksum: Mapped[str | None] = mapped_column(String(64))
     checksum: Mapped[str] = mapped_column(String(64))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RoleProfileBinding(Base):
+    __tablename__ = "role_profile_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_role_version_id", "version", name="uq_role_profile_binding_version"
+        ),
+        CheckConstraint("version > 0", name="ck_role_profile_binding_version"),
+        CheckConstraint(
+            "agent4k_role_profile_version_id > 0", name="ck_role_profile_binding_id"
+        ),
+        CheckConstraint(
+            "agent4k_role_profile_checksum ~ '^[0-9a-f]{64}$'",
+            name="ck_role_profile_binding_checksum",
+        ),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    project_role_version_id: Mapped[int] = mapped_column(
+        ForeignKey("project_role_versions.id", ondelete="RESTRICT")
+    )
+    version: Mapped[int]
+    agent4k_role_profile_version_id: Mapped[int] = mapped_column(BigInteger)
+    agent4k_role_profile_checksum: Mapped[str] = mapped_column(String(64))
+    published_by_user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ParticipantRole(Base):
@@ -205,6 +241,9 @@ class AssessmentAssignment(Base, TimestampMixin):
     )
     project_role_version_id: Mapped[int] = mapped_column(
         ForeignKey("project_role_versions.id", ondelete="RESTRICT")
+    )
+    role_profile_binding_id: Mapped[int | None] = mapped_column(
+        ForeignKey("role_profile_bindings.id", ondelete="RESTRICT")
     )
     external_cycle_id: Mapped[str | None] = mapped_column(String(255), unique=True)
     status: Mapped[str] = mapped_column(String(32), default="assigned")

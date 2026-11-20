@@ -18,9 +18,11 @@ from app.models import (
     ProjectParticipant,
     ProjectRole,
     ProjectRoleVersion,
+    RoleProfileBinding,
     User,
     UserSystemRole,
 )
+from app.role_catalog import load_role_catalog
 
 ROLE_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
 ALLOWED_STAGES = frozenset(stage.value for stage in CrispDmStage)
@@ -60,6 +62,15 @@ class RoleAssignmentResult:
     role_version: int
     is_primary: bool
     created: bool
+
+
+@dataclass(frozen=True)
+class RoleProfileBindingView:
+    role_code: str
+    project_role_version: int
+    binding_version: int
+    agent4k_role_profile_version_id: int
+    agent4k_role_profile_checksum: str
 
 
 @dataclass(frozen=True)
@@ -313,6 +324,143 @@ class RoleService:
             )
             return RoleView(role.code, role.name, version.version, version.status, version.checksum)
 
+    async def publish_role_profile_binding(
+        self,
+        identity: TelegramIdentity,
+        *,
+        project_code: str,
+        role_code: str,
+        agent4k_role_profile_version_id: int,
+        agent4k_role_profile_checksum: str,
+        adapter: Agent4KPort,
+    ) -> RoleProfileBindingView:
+        checksum = agent4k_role_profile_checksum.strip().lower()
+        if agent4k_role_profile_version_id <= 0 or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise RoleError("Укажите положительный ID и SHA-256 опубликованной роли 4К.")
+        catalog = load_role_catalog()
+        catalog_role = catalog.find(role_code)
+        if catalog_role is None:
+            raise RoleError("Сопоставление доступно только для роли текущего семестра.")
+
+        async with self._session_factory() as session:
+            actor = await _require_admin(session, identity)
+            project = await _project(session, project_code)
+            if project.created_by_user_id != actor.id:
+                raise AccessDeniedError("Управлять сопоставлением может только владелец проекта.")
+            role = await session.scalar(
+                select(ProjectRole).where(
+                    ProjectRole.project_id == project.id,
+                    ProjectRole.code == catalog_role.code,
+                )
+            )
+            if role is None:
+                raise RoleError("Роль не найдена в проекте.")
+            version = await session.scalar(
+                select(ProjectRoleVersion)
+                .where(
+                    ProjectRoleVersion.project_role_id == role.id,
+                    ProjectRoleVersion.status == "published",
+                )
+                .order_by(ProjectRoleVersion.version.desc())
+            )
+            if version is None or version.source_json.get("catalog_checksum") != catalog.sha256:
+                raise RoleError("Сопоставление требует опубликованную каталожную версию.")
+            if version.agent4k_role_profile_version_id is not None:
+                raise RoleError("Эта версия роли уже содержит прежнюю встроенную связь с 4К.")
+            latest = await session.scalar(
+                select(RoleProfileBinding)
+                .where(RoleProfileBinding.project_role_version_id == version.id)
+                .order_by(RoleProfileBinding.version.desc())
+            )
+            if (
+                latest is not None
+                and latest.agent4k_role_profile_version_id == agent4k_role_profile_version_id
+                and latest.agent4k_role_profile_checksum == checksum
+            ):
+                return RoleProfileBindingView(
+                    role.code, version.version, latest.version,
+                    latest.agent4k_role_profile_version_id,
+                    latest.agent4k_role_profile_checksum,
+                )
+            role_version_id = version.id
+
+        published_ref = await adapter.get_published_role_profile(
+            version_id=agent4k_role_profile_version_id
+        )
+        if (
+            published_ref.id != agent4k_role_profile_version_id
+            or published_ref.checksum != checksum
+        ):
+            raise RoleError("ID или checksum опубликованной роли 4К не совпадает.")
+
+        async with self._session_factory.begin() as session:
+            actor = await _require_admin(session, identity)
+            project = await _project(session, project_code)
+            if project.created_by_user_id != actor.id:
+                raise AccessDeniedError("Управлять сопоставлением может только владелец проекта.")
+            version = await session.get(ProjectRoleVersion, role_version_id)
+            if version is None or version.status != "published":
+                raise RoleError("Версия учебной роли изменилась; повторите операцию.")
+            role = await session.get(ProjectRole, version.project_role_id, with_for_update=True)
+            if role is None or role.project_id != project.id or role.code != catalog_role.code:
+                raise RoleError("Роль проекта изменилась; повторите операцию.")
+            latest_role_version = await session.scalar(
+                select(ProjectRoleVersion.id)
+                .where(
+                    ProjectRoleVersion.project_role_id == role.id,
+                    ProjectRoleVersion.status == "published",
+                )
+                .order_by(ProjectRoleVersion.version.desc())
+            )
+            if latest_role_version != version.id:
+                raise RoleError("Появилась новая версия учебной роли; повторите операцию.")
+            latest = await session.scalar(
+                select(RoleProfileBinding)
+                .where(RoleProfileBinding.project_role_version_id == version.id)
+                .order_by(RoleProfileBinding.version.desc())
+            )
+            if (
+                latest is not None
+                and latest.agent4k_role_profile_version_id == published_ref.id
+                and latest.agent4k_role_profile_checksum == published_ref.checksum
+            ):
+                return RoleProfileBindingView(
+                    role.code, version.version, latest.version,
+                    latest.agent4k_role_profile_version_id,
+                    latest.agent4k_role_profile_checksum,
+                )
+            binding = RoleProfileBinding(
+                project_role_version_id=version.id,
+                version=(latest.version + 1 if latest else 1),
+                agent4k_role_profile_version_id=published_ref.id,
+                agent4k_role_profile_checksum=published_ref.checksum,
+                published_by_user_id=actor.id,
+                published_at=datetime.now(UTC),
+            )
+            session.add(binding)
+            await session.flush()
+            session.add(
+                AuditEvent(
+                    actor_user_id=actor.id,
+                    project_id=project.id,
+                    entity_type="role_profile_binding",
+                    entity_id=str(binding.id),
+                    action="published",
+                    payload_json={
+                        "role_code": role.code,
+                        "project_role_version": version.version,
+                        "binding_version": binding.version,
+                        "agent4k_role_profile_version_id": published_ref.id,
+                        "agent4k_role_profile_checksum": published_ref.checksum,
+                    },
+                )
+            )
+            return RoleProfileBindingView(
+                role.code, version.version, binding.version,
+                binding.agent4k_role_profile_version_id,
+                binding.agent4k_role_profile_checksum,
+            )
+
     async def assign(
         self,
         identity: TelegramIdentity,
@@ -321,6 +469,8 @@ class RoleService:
         participant_id: int,
         role_code: str,
     ) -> RoleAssignmentResult:
+        if load_role_catalog().find(role_code) is None:
+            raise RoleError("В текущем семестре можно назначать только роли из /roles.")
         async with self._session_factory.begin() as session:
             actor = await _require_admin(session, identity)
             project = await _project(session, project_code)
