@@ -1465,3 +1465,26 @@ async def test_published_assessment_spec_is_immutable(database_url: str) -> None
             spec = await session.scalar(select(ProjectAssessmentSpec))
             assert spec is not None
             spec.snapshot_json = {"changed": True}
+
+
+async def test_approval_of_old_spec_cannot_publish_new_draft(database_url: str) -> None:
+    assessments, admin, _, _ = await assessment_fixture(database_url)
+    first = await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01", draft=sample_spec()
+    )
+    await assessments.publish_spec(
+        admin, project_code="TBA-2026-G01", expected_version=first.version
+    )
+    second = await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01", draft=sample_spec()
+    )
+    with pytest.raises(AssessmentError, match="уже утверждены"):
+        await assessments.publish_spec(
+            admin, project_code="TBA-2026-G01", expected_version=first.version
+        )
+    specs = await assessments.list_specs(admin, project_code="TBA-2026-G01")
+    assert next(item for item in specs if item.version == second.version).status == "draft"
+    result = await assessments.publish_spec(
+        admin, project_code="TBA-2026-G01", expected_version=second.version
+    )
+    assert result.status == "published"

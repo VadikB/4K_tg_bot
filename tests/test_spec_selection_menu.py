@@ -179,4 +179,34 @@ async def test_recipient_button_preserves_service_contract(label, policy):
 
     await bot_module.spec_recipient_policy(message, state, Service())
     assert state.data == {}
-    assert message.answers[-1][1].remove_keyboard
+    assert message.answers[-2][1].remove_keyboard
+    text, markup = message.answers[-1]
+    assert "Количество кейсов: 5" in text
+    assert "Период: без ограничения по датам" in text
+    assert "Checksum" not in text and "Runtime" not in text and "Draft" not in text
+    assert markup.inline_keyboard[0][0].text == "Утвердить настройки"
+    assert markup.inline_keyboard[0][0].callback_data == "approve_spec:PRJ-1:1"
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+async def test_approval_checks_project_and_pins_displayed_version(monkeypatch, allowed):
+    monkeypatch.setattr(bot_module, "Message", FakeMessage)
+    message = FakeMessage()
+    callback = FakeCallback(message, "approve_spec:PRJ-1:3")
+    calls = []
+
+    class Projects:
+        async def list_projects(self, identity):
+            return [SimpleNamespace(code="PRJ-1")] if allowed else []
+
+    class Assessments:
+        async def publish_spec(self, identity, *, project_code, expected_version):
+            calls.append((identity.telegram_user_id, project_code, expected_version))
+
+    await bot_module.approve_spec_settings(callback, Projects(), Assessments())
+    assert calls == ([(11, "PRJ-1", 3)] if allowed else [])
+    if allowed:
+        assert message.answers[0] == ("page", None)
+        assert "утверждены" in message.answers[-1][0]
+    else:
+        assert "недоступен" in callback.alerts[-1]

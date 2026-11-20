@@ -272,7 +272,8 @@ class AssessmentService:
             )
 
     async def publish_spec(
-        self, identity: TelegramIdentity, *, project_code: str
+        self, identity: TelegramIdentity, *, project_code: str,
+        expected_version: int | None = None,
     ) -> AssessmentSpecView:
         async with self._session_factory.begin() as session:
             actor = await _require_admin(session, identity)
@@ -282,12 +283,16 @@ class AssessmentService:
                 .where(
                     ProjectAssessmentSpec.project_id == project.id,
                     ProjectAssessmentSpec.status == "draft",
+                    *([ProjectAssessmentSpec.version == expected_version]
+                      if expected_version is not None else []),
                 )
                 .order_by(ProjectAssessmentSpec.version.desc())
                 .with_for_update()
             )
             if spec is None:
-                raise AssessmentError("У проекта нет draft спецификации.")
+                raise AssessmentError(
+                    "Эти настройки уже утверждены или недоступны. Проверьте /specs."
+                )
             if definition_checksum(dict(spec.snapshot_json)) != spec.checksum:
                 raise AssessmentError("Checksum snapshot спецификации не совпадает.")
             spec.status = "published"
