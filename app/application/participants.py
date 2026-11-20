@@ -150,8 +150,14 @@ class ParticipantService:
         )
         async with self._session_factory.begin() as session:
             await _require_admin(session, identity)
-            participant = await session.get(ProjectParticipant, participant_id)
-            if participant is None or participant.external_subject_ref != subject:
+            project = await session.scalar(select(Project).where(
+                Project.code == normalize_project_code(project_code),
+                Project.created_by_user_id == actor.id))
+            participant = await session.scalar(select(ProjectParticipant).where(
+                ProjectParticipant.id == participant_id,
+                ProjectParticipant.status == "active").with_for_update())
+            if (project is None or participant is None or participant.project_id != project.id
+                    or participant.external_subject_ref != subject):
                 raise ParticipantIdentityNotReadyError("Связь участника изменилась.")
             if participant.agent4k_linked_at is None:
                 participant.agent4k_linked_at = datetime.now(UTC)
