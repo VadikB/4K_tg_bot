@@ -1521,3 +1521,26 @@ async def test_opaque_subject_timeout_reuses_persisted_random_key(database_url: 
         participant = await session.get(ProjectParticipant, participant_id)
         assert participant.agent4k_linked_at is not None
         assert participant.agent4k_user_id is None
+
+
+async def test_approval_of_old_spec_cannot_publish_new_draft(database_url: str) -> None:
+    assessments, admin, _, _ = await assessment_fixture(database_url)
+    first = await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01", draft=sample_spec()
+    )
+    await assessments.publish_spec(
+        admin, project_code="TBA-2026-G01", expected_version=first.version
+    )
+    second = await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01", draft=sample_spec()
+    )
+    with pytest.raises(AssessmentError, match="уже утверждены"):
+        await assessments.publish_spec(
+            admin, project_code="TBA-2026-G01", expected_version=first.version
+        )
+    specs = await assessments.list_specs(admin, project_code="TBA-2026-G01")
+    assert next(item for item in specs if item.version == second.version).status == "draft"
+    result = await assessments.publish_spec(
+        admin, project_code="TBA-2026-G01", expected_version=second.version
+    )
+    assert result.status == "published"
