@@ -59,4 +59,3 @@ def decide_case_request(
     if local_date(current, timezone_name) in delivered_dates:
         return CaseDecision(CaseDecisionCode.DAILY_LIMIT_REACHED, remaining)
     return CaseDecision(CaseDecisionCode.ISSUE_NEW, remaining)
-

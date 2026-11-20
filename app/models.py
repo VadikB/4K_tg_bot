@@ -368,4 +368,3 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(64))
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-

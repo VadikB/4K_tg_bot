@@ -178,4 +178,3 @@ TEST_DATABASE_URL=postgresql+asyncpg://.../4k_tg_bot_test pytest -m integration
 - Ответы и результаты оценки не пишутся в обычные application logs.
 - При недоступной интеграции с 4К выдача кейса завершается ошибкой, без встроенной
   предметной подмены.
-

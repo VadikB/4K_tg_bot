@@ -60,4 +60,3 @@ async def test_adapter_selection_follows_integration_mode() -> None:
     ))
     assert isinstance(mock, HttpAgent4KAdapter)
     await mock.close()
-

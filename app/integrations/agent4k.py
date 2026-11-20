@@ -411,4 +411,3 @@ class HttpAgent4KAdapter:
 
     async def close(self) -> None:
         await self._client.aclose()
-

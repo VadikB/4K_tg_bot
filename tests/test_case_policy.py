@@ -68,4 +68,3 @@ def test_complete_assignment_has_zero_remaining() -> None:
 def test_naive_time_is_rejected() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         local_date(datetime(2026, 11, 6), "Europe/Moscow")
-

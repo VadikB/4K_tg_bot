@@ -49,4 +49,3 @@ class Settings(BaseSettings):
                 raise ValueError("Mock integration requires a loopback HTTP AGENT4K_API_URL")
         if not 1 <= self.invitation_ttl_hours <= 720:
             raise ValueError("INVITATION_TTL_HOURS must be between 1 and 720")
-

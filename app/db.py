@@ -14,4 +14,3 @@ async def session_scope(
     async with factory() as session:
         async with session.begin():
             yield session
-

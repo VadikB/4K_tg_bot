@@ -278,4 +278,3 @@ async def test_http_adapter_preserves_channel_conflict(code: str) -> None:
     finally:
         await adapter.close()
     assert caught.value.code == code
-

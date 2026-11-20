@@ -35,4 +35,3 @@ email передаётся отдельно только в identity-link endpoi
 HTTP-адаптер ожидает `POST /integration/cycles/{cycle_id}/cases/next` и поля
 `cycle_id`, `session_id`, `case_id`, `participant_text`. Этот endpoint ещё должен
 быть согласован и реализован в 4К; до этого `AGENT4K_INTEGRATION_MODE=disabled`.
-
