@@ -1,5 +1,4 @@
 import hashlib
-import json
 import unicodedata
 from datetime import date
 from typing import Any
@@ -1405,7 +1404,16 @@ async def connect_program(
 def _channel_state_text(state: EducationalChannelState, assignment_id: int) -> str:
     next_action = getattr(state, "next_action", None)
     if next_action is None:
-        return "Сейчас действий не требуется. Повторите /progress позже."
+        return {
+            "preparing": "Готовим первый кейс. Немного позже нажмите /get_case.",
+            "awaiting_admission": (
+                "Преподаватель завершает подготовку оценки. Ваши ответы сохранены."
+            ),
+            "technical_failure": (
+                "Подготовка временно недоступна. Сообщите преподавателю; ответы сохранены."
+            ),
+            "cycle_completed": "Прохождение оценки завершено.",
+        }.get(state.state, "Сейчас действий не требуется. Повторите /progress позже.")
     payload = next_action.participant_payload
     labels = {
         "acquaintance_consent": "Перед началом оценки ознакомьтесь с условиями:",
@@ -1417,7 +1425,40 @@ def _channel_state_text(state: EducationalChannelState, assignment_id: int) -> s
     }
     lines = [labels.get(next_action.action_type, "Следующий шаг оценки:")]
     if payload:
-        lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
+        if next_action.action_type == "acquaintance_consent":
+            for key, label in (("purpose", "Цель"), ("organizer", "Проект"),
+                               ("results_usage", "Использование результатов"),
+                               ("result_recipients", "Получатели"), ("consent_text", "Согласие")):
+                if payload.get(key):
+                    lines.append(f"{label}: {payload[key]}")
+        elif next_action.action_type == "acquaintance_answer":
+            lines.append(str(payload.get("question") or ""))
+        elif next_action.action_type == "acquaintance_confirm":
+            answers = payload.get("answers")
+            if isinstance(answers, dict):
+                lines.extend(f"Ответ {i}: {answers.get(f'answer_{i}', '')}" for i in (1, 2, 3))
+        elif next_action.action_type == "case_turn":
+            for key, label in (("title", ""), ("introduction", ""), ("text", ""),
+                               ("initial_situation", "Ситуация"), ("trigger", "Событие"),
+                               ("assessee_position", "Ваша роль"),
+                               ("participants_and_positions", "Участники ситуации"),
+                               ("assessee_task", "Ваша задача"),
+                               ("conditions_and_constraints", "Условия")):
+                if payload.get(key):
+                    lines.append((f"{label}: " if label else "") + str(payload[key]))
+            materials = payload.get("initial_materials")
+            if isinstance(materials, list):
+                for material in materials:
+                    if isinstance(material, dict):
+                        lines.extend(str(material[key]) for key in ("title", "text")
+                                     if material.get(key))
+            trace = next_action.trace or {}
+            turns = trace.get("turns")
+            if isinstance(turns, list):
+                for turn in turns:
+                    if isinstance(turn, dict) and turn.get("speaker_type") == "character":
+                        if turn.get("content_text"):
+                            lines.append(str(turn["content_text"]))
     input_kind = str(next_action.input.get("kind", ""))
     if input_kind == "text":
         lines.append("Отправьте ответ следующим сообщением или используйте /cancel.")

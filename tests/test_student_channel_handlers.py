@@ -41,6 +41,31 @@ def channel_state(*, revision: int = 3, text_action: bool = True) -> Educational
     )
 
 
+def test_channel_renders_public_text_without_transport_metadata() -> None:
+    from app.bot import _channel_state_text
+
+    state = channel_state()
+    action = state.next_action
+    assert action is not None
+    consent = replace(state, next_action=replace(
+        action, action_type="acquaintance_consent", input={"kind": "confirm"},
+        participant_payload={"purpose": "Цель проекта", "consent_text": "Текст согласия",
+                             "consent_version": 1},
+    ))
+    text = _channel_state_text(consent, 7)
+    assert "Цель: Цель проекта" in text and "Текст согласия" in text
+    assert "consent_version" not in text and "acquaintance_consent" not in text
+    case = replace(state, next_action=replace(action,
+        participant_payload={"title": "Кейс", "introduction": "Описание ситуации",
+                             "case_id": "technical-id"},
+        trace={"private": "hidden", "turns": [
+            {"speaker_type": "character", "content_text": "Реплика персонажа"}]},
+    ))
+    text = _channel_state_text(case, 7)
+    assert "Описание ситуации" in text and "Реплика персонажа" in text
+    assert "technical-id" not in text and "hidden" not in text
+
+
 class FakeMessage:
     def __init__(self, text: str, message_id: int = 101) -> None:
         self.text = text
