@@ -102,25 +102,29 @@ class AssignRoleWizard(StatesGroup):
     role = State()
 
 
-ASSIGN_ROLE_PAGE_SIZE = 8
+CHOICE_PAGE_SIZE = 8
 
 
-def assign_role_keyboard(
-    items: list[tuple[str, str]], token: str, stage: str, page: int = 0
+def choice_keyboard(
+    items: list[tuple[str, str]], token: str, stage: str, page: int = 0, *, prefix: str = "ar"
 ) -> InlineKeyboardMarkup:
-    start = page * ASSIGN_ROLE_PAGE_SIZE
+    start = page * CHOICE_PAGE_SIZE
     rows = [
-        [InlineKeyboardButton(text=label[:64], callback_data=f"ar:{token}:{stage}:{index}")]
-        for index, (label, _) in enumerate(items[start : start + ASSIGN_ROLE_PAGE_SIZE], start)
+        [InlineKeyboardButton(text=label[:64], callback_data=f"{prefix}:{token}:{stage}:{index}")]
+        for index, (label, _) in enumerate(items[start : start + CHOICE_PAGE_SIZE], start)
     ]
     navigation = []
     if page:
         navigation.append(
-            InlineKeyboardButton(text="← Назад", callback_data=f"ar:{token}:{stage}:p{page - 1}")
+            InlineKeyboardButton(
+                text="← Назад", callback_data=f"{prefix}:{token}:{stage}:p{page - 1}"
+            )
         )
-    if start + ASSIGN_ROLE_PAGE_SIZE < len(items):
+    if start + CHOICE_PAGE_SIZE < len(items):
         navigation.append(
-            InlineKeyboardButton(text="Далее →", callback_data=f"ar:{token}:{stage}:p{page + 1}")
+            InlineKeyboardButton(
+                text="Далее →", callback_data=f"{prefix}:{token}:{stage}:p{page + 1}"
+            )
         )
     if navigation:
         rows.append(navigation)
@@ -448,23 +452,99 @@ async def projects(message: Message, project_service: ProjectService) -> None:
 async def add_participant(
     message: Message, state: FSMContext, project_service: ProjectService
 ) -> None:
-    _, is_admin = await project_service.ensure_actor(identity_from_message(message))
+    if message.chat.type != "private":
+        await message.answer("Приглашение участника доступно в личном чате с ботом.")
+        return
+    identity = identity_from_message(message)
+    actor, is_admin = await project_service.ensure_actor(identity)
     if not is_admin:
         await message.answer("Приглашать участников может только администратор.")
         return
+    projects = [
+        item
+        for item in await project_service.list_projects(identity)
+        if item.created_by_user_id == actor.id
+    ]
+    if not projects:
+        await message.answer("Нет проектов, в которые вы можете пригласить участника.")
+        return
     await state.clear()
+    token = uuid4().hex[:12]
+    items = [(f"{item.code} — {item.name}", item.code) for item in projects]
+    await state.update_data(token=token, projects=items)
     await state.set_state(ParticipantWizard.project_code)
-    await message.answer("Введите код проекта:")
+    await message.answer(
+        "Выберите проект для приглашения:",
+        reply_markup=choice_keyboard(items, token, "project", prefix="ap"),
+    )
 
 
-@router.message(ParticipantWizard.project_code, F.text)
-async def participant_project_code(message: Message, state: FSMContext) -> None:
-    await state.update_data(project_code=message.text)
+@router.callback_query(F.data.startswith("ap:"))
+async def participant_project_choice(
+    callback: CallbackQuery, state: FSMContext, project_service: ProjectService
+) -> None:
+    if not isinstance(callback.message, Message) or callback.from_user is None:
+        await callback.answer("Откройте личный чат с ботом.", show_alert=True)
+        return
+    parts = (callback.data or "").split(":")
+    data = await state.get_data()
+    if (
+        len(parts) != 4
+        or parts[0] != "ap"
+        or parts[1] != data.get("token")
+        or parts[2] != "project"
+        or await state.get_state() != ParticipantWizard.project_code.state
+    ):
+        await callback.answer("Список устарел. Начните заново: /add_participant", show_alert=True)
+        return
+    items = data.get("projects")
+    if not isinstance(items, list):
+        await callback.answer("Список устарел. Начните заново: /add_participant", show_alert=True)
+        return
+    selected = parts[3]
+    if selected.startswith("p") and selected[1:].isascii() and selected[1:].isdecimal():
+        page = int(selected[1:])
+        if page * CHOICE_PAGE_SIZE >= len(items):
+            await callback.answer("Страница недоступна.", show_alert=True)
+            return
+        await callback.message.edit_reply_markup(
+            reply_markup=choice_keyboard(items, data["token"], "project", page, prefix="ap")
+        )
+        await callback.answer()
+        return
+    if not selected.isascii() or not selected.isdecimal() or int(selected) >= len(items):
+        await callback.answer("Пункт недоступен.", show_alert=True)
+        return
+    project_code = items[int(selected)][1]
+    identity = TelegramIdentity(
+        telegram_user_id=callback.from_user.id,
+        telegram_username=callback.from_user.username,
+        display_name=callback.from_user.full_name,
+    )
+    try:
+        actor, is_admin = await project_service.ensure_actor(identity)
+        projects = await project_service.list_projects(identity)
+        if not is_admin or project_code not in {
+            item.code for item in projects if item.created_by_user_id == actor.id
+        }:
+            raise AccessDeniedError("Проект больше недоступен для приглашения.")
+    except AccessDeniedError as exc:
+        await state.clear()
+        await callback.message.answer(str(exc))
+        await callback.answer()
+        return
+    await state.update_data(project_code=project_code)
     await state.set_state(ParticipantWizard.display_name)
-    await message.answer("Введите ФИО участника:")
+    await callback.message.answer("Введите ФИО участника:")
+    await callback.answer()
 
 
-@router.message(ParticipantWizard.display_name, F.text)
+@router.message(ParticipantWizard.project_code, F.text & ~F.text.startswith("/"))
+async def participant_project_text(message: Message, state: FSMContext) -> None:
+    await message.answer("Выберите проект кнопкой в сообщении выше или /cancel.")
+
+
+@router.message(ParticipantWizard.display_name, F.text & ~F.text.startswith("/"))
 async def participant_display_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     if not name or len(name) > 255:
@@ -475,7 +555,7 @@ async def participant_display_name(message: Message, state: FSMContext) -> None:
     await message.answer("Введите email участника:")
 
 
-@router.message(ParticipantWizard.email, F.text)
+@router.message(ParticipantWizard.email, F.text & ~F.text.startswith("/"))
 async def participant_email(message: Message, state: FSMContext) -> None:
     try:
         email = normalize_email(message.text or "")
@@ -487,7 +567,7 @@ async def participant_email(message: Message, state: FSMContext) -> None:
     await message.answer("Введите числовой Telegram ID участника:")
 
 
-@router.message(ParticipantWizard.telegram_user_id, F.text)
+@router.message(ParticipantWizard.telegram_user_id, F.text & ~F.text.startswith("/"))
 async def participant_telegram_user_id(
     message: Message, state: FSMContext, participant_service: ParticipantService
 ) -> None:
@@ -728,7 +808,7 @@ async def assign_role(
         await state.update_data(token=token, projects=items)
         await state.set_state(AssignRoleWizard.project)
         await message.answer(
-            "Выберите код проекта:", reply_markup=assign_role_keyboard(items, token, "project")
+            "Выберите код проекта:", reply_markup=choice_keyboard(items, token, "project")
         )
         return
     if len(parts) != 3 or not parts[1].isascii() or not parts[1].isdecimal():
@@ -784,11 +864,11 @@ async def assign_role_choice(
         return
     if selected.startswith("p") and selected[1:].isascii() and selected[1:].isdecimal():
         page = int(selected[1:])
-        if page * ASSIGN_ROLE_PAGE_SIZE >= len(items):
+        if page * CHOICE_PAGE_SIZE >= len(items):
             await callback.answer("Страница недоступна.", show_alert=True)
             return
         await callback.message.edit_reply_markup(
-            reply_markup=assign_role_keyboard(items, data["token"], stage, page)
+            reply_markup=choice_keyboard(items, data["token"], stage, page)
         )
         await callback.answer()
         return
@@ -818,7 +898,7 @@ async def assign_role_choice(
                 await state.set_state(AssignRoleWizard.participant)
                 await callback.message.answer(
                     "Выберите ID участника:",
-                    reply_markup=assign_role_keyboard(choices, data["token"], "participant"),
+                    reply_markup=choice_keyboard(choices, data["token"], "participant"),
                 )
         elif stage == "participant":
             participants = await participant_service.list_participants(
@@ -846,7 +926,7 @@ async def assign_role_choice(
                 await state.set_state(AssignRoleWizard.role)
                 await callback.message.answer(
                     "Выберите код роли:",
-                    reply_markup=assign_role_keyboard(choices, data["token"], "role"),
+                    reply_markup=choice_keyboard(choices, data["token"], "role"),
                 )
         else:
             result = await role_service.assign(
