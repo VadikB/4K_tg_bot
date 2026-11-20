@@ -89,14 +89,22 @@ async def test_assign_role_selects_project_participant_and_role(monkeypatch) -> 
     roles = FakeRoles()
     await assign_role(message, SimpleNamespace(args=None), state, projects, roles)
     token = state.data["token"]
-    assert "Выберите проект" in message.answers[-1][0]
+    assert message.answers[-1][0] == "Выберите код проекта:"
+    assert message.answers[-1][1].inline_keyboard[0][0].text == "PRJ-1 — Первый проект"
 
     for stage in ("project", "participant", "role"):
         callback = FakeCallback(message, f"ar:{token}:{stage}:0")
         await assign_role_choice(callback, state, projects, participants, roles)
         assert callback.alerts == [None]
+        if stage == "project":
+            assert message.answers[-1][0] == "Выберите ID участника:"
+            assert message.answers[-1][1].inline_keyboard[0][0].text == "ID 42 — Участник"
         if stage == "participant":
-            assert "v2" in message.answers[-1][1].inline_keyboard[0][0].text
+            assert message.answers[-1][0] == "Выберите код роли:"
+            assert (
+                message.answers[-1][1].inline_keyboard[0][0].text
+                == "business_analyst — Бизнес-аналитик (v2)"
+            )
 
     assert roles.assigned == [
         {

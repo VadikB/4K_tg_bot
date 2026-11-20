@@ -724,11 +724,11 @@ async def assign_role(
             return
         await state.clear()
         token = uuid4().hex[:12]
-        items = [(f"{item.name} ({item.code})", item.code) for item in projects]
+        items = [(f"{item.code} — {item.name}", item.code) for item in projects]
         await state.update_data(token=token, projects=items)
         await state.set_state(AssignRoleWizard.project)
         await message.answer(
-            "Выберите проект:", reply_markup=assign_role_keyboard(items, token, "project")
+            "Выберите код проекта:", reply_markup=assign_role_keyboard(items, token, "project")
         )
         return
     if len(parts) != 3 or not parts[1].isascii() or not parts[1].isdecimal():
@@ -812,12 +812,12 @@ async def assign_role_choice(
                 await callback.message.answer("В проекте пока нет участников.")
             else:
                 choices = [
-                    (f"{item.display_name} (ID {item.id})", str(item.id)) for item in participants
+                    (f"ID {item.id} — {item.display_name}", str(item.id)) for item in participants
                 ]
                 await state.update_data(project_code=value, participants=choices)
                 await state.set_state(AssignRoleWizard.participant)
                 await callback.message.answer(
-                    "Выберите участника:",
+                    "Выберите ID участника:",
                     reply_markup=assign_role_keyboard(choices, data["token"], "participant"),
                 )
         elif stage == "participant":
@@ -839,12 +839,13 @@ async def assign_role_choice(
                 )
             else:
                 choices = [
-                    (f"{item.name} (v{item.version})", code) for code, item in published.items()
+                    (f"{code} — {item.name} (v{item.version})", code)
+                    for code, item in published.items()
                 ]
                 await state.update_data(participant_id=int(value), roles=choices)
                 await state.set_state(AssignRoleWizard.role)
                 await callback.message.answer(
-                    "Выберите роль:",
+                    "Выберите код роли:",
                     reply_markup=assign_role_keyboard(choices, data["token"], "role"),
                 )
         else:
