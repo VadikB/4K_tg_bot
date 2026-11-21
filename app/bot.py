@@ -1065,6 +1065,7 @@ async def spec_choice(
                 assessment_configuration_ref=option.ref,
                 assessment_configuration_checksum=option.reference_checksum,
                 methodology_ref=option.methodology_ref,
+                configuration_name=option.name,
             )
             await state.set_state(AssessmentSpecWizard.required_case_count)
             await callback.message.answer("Сколько кейсов должен пройти участник?")
@@ -1135,14 +1136,69 @@ async def spec_recipient_policy(
         await message.answer(f"Спецификация не создана: {exc}\nИсправьте значение или /cancel.")
         return
     await state.clear()
+    await message.answer("Настройки оценки сохранены.", reply_markup=ReplyKeyboardRemove())
+    start = draft.available_from.strftime("%d.%m.%Y") if draft.available_from else None
+    end = draft.available_until.strftime("%d.%m.%Y") if draft.available_until else None
+    period = f"с {start} по {end}" if start and end else "без ограничения по датам"
+    recipient = {
+        "participant": "участник",
+        "instructor": "преподаватель",
+        "participant_and_instructor": "участник и преподаватель",
+    }[draft.result_recipient_policy]
     await message.answer(
-        f"Draft спецификации v{result.version} создан.\n"
-        f"Кейсов: {result.required_case_count}\n"
-        f"Checksum: {result.checksum}\n"
-        f"Runtime: {result.runtime_admission}\n"
-        f"Опубликовать локальный snapshot: /publish_spec {project_code}",
-        reply_markup=ReplyKeyboardRemove(),
+        f"Проверьте настройки оценки проекта {project_code}:\n"
+        f"Конфигурация 4К: {data.get('configuration_name', draft.assessment_configuration_ref)}\n"
+        f"Количество кейсов: {result.required_case_count}\n"
+        f"Период: {period}\n"
+        f"Результат получат: {recipient}.\n\n"
+        "После утверждения эта версия настроек будет зафиксирована.\n"
+        "Оценка ещё не запущена. Готовность к запуску в 4К проверяется отдельно.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Утвердить настройки",
+                callback_data=f"approve_spec:{project_code}:{result.version}",
+            )
+        ]]),
     )
+
+
+@router.callback_query(F.data.startswith("approve_spec:"))
+async def approve_spec_settings(
+    callback: CallbackQuery,
+    project_service: ProjectService,
+    assessment_service: AssessmentService,
+) -> None:
+    if not isinstance(callback.message, Message) or callback.from_user is None:
+        await callback.answer("Откройте личный чат с ботом.", show_alert=True)
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Утверждение доступно только в личном чате.", show_alert=True)
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[2].isascii() or not parts[2].isdecimal():
+        await callback.answer("Кнопка недействительна.", show_alert=True)
+        return
+    identity = TelegramIdentity(
+        telegram_user_id=callback.from_user.id,
+        telegram_username=callback.from_user.username,
+        display_name=callback.from_user.full_name,
+    )
+    try:
+        projects = await project_service.list_projects(identity)
+        if parts[1] not in {item.code for item in projects}:
+            raise AccessDeniedError("Проект недоступен.")
+        await assessment_service.publish_spec(
+            identity, project_code=parts[1], expected_version=int(parts[2])
+        )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        "Настройки оценки утверждены. Эта версия зафиксирована.\n"
+        "Оценка ещё не запущена. Готовность к запуску в 4К проверяется отдельно."
+    )
+    await callback.answer()
 
 
 @router.message(Command("publish_spec"))
@@ -1160,8 +1216,8 @@ async def publish_spec(
         await message.answer(str(exc))
         return
     await message.answer(
-        f"Локальная спецификация v{result.version} опубликована неизменяемо.\n"
-        f"Runtime 4К: {result.runtime_admission}."
+        f"Настройки оценки проекта {result.project_code} утверждены.\n"
+        "Оценка ещё не запущена. Готовность к запуску в 4К проверяется отдельно."
     )
 
 
@@ -1182,13 +1238,22 @@ async def specs(
     if not items:
         await message.answer("У проекта нет спецификаций оценки.")
         return
-    await message.answer(
-        "\n".join(
-            f"v{item.version} — {item.status}; кейсов {item.required_case_count}; "
-            f"runtime {item.runtime_admission}"
-            for item in items
+    for item in items:
+        status = "утверждены" if item.status == "published" else "ожидают утверждения"
+        markup = None
+        if item.status == "draft":
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="Утвердить настройки",
+                    callback_data=f"approve_spec:{item.project_code}:{item.version}",
+                )
+            ]])
+        await message.answer(
+            f"Настройки оценки проекта {item.project_code}, версия {item.version}: {status}.\n"
+            f"Количество кейсов: {item.required_case_count}.\n"
+            "Утверждение настроек само по себе не запускает оценку.",
+            reply_markup=markup,
         )
-    )
 
 
 @router.message(Command("assign_assessment"))
