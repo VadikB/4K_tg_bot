@@ -137,7 +137,7 @@ async def test_case_status_reads_current_availability_without_action() -> None:
             action_type="case_continue", input={"kind": "confirm"})), "1", "Кейс подготовлен"),
         (replace(channel_state(), next_action=replace(action,
             action_type="acquaintance_answer")), "0", "Перед кейсом"),
-        (replace(channel_state(), state="preparing", next_action=None), "0", "готовит кейс"),
+        (replace(channel_state(), state="preparing", next_action=None), "0", "готовит оценку"),
         (replace(channel_state(), state="waiting", next_action=None), "0", "пока недоступен"),
         (replace(channel_state(), state="awaiting_admission", next_action=None),
          "0", "условия оценки"),

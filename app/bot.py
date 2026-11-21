@@ -1366,7 +1366,7 @@ def _current_case_status(state: EducationalChannelState) -> tuple[str, str]:
     if state.state == "cycle_completed":
         return "0", "Оценка завершена."
     if state.state == "preparing":
-        return "0", "4К готовит кейс."
+        return "0", "4К готовит оценку; кейс пока недоступен."
     if state.state == "waiting":
         return "0", "Следующий кейс пока недоступен."
     if state.state == "awaiting_admission":
@@ -1534,7 +1534,7 @@ def _channel_state_text(state: EducationalChannelState, assignment_id: int) -> s
     next_action = getattr(state, "next_action", None)
     if next_action is None:
         text = {
-            "preparing": "Готовим кейс.",
+            "preparing": "Подготовка оценки продолжается.",
             "waiting": "Следующий кейс пока недоступен.",
             "awaiting_admission": (
                 "Преподаватель завершает подготовку оценки. Ваши ответы сохранены."
