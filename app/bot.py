@@ -71,6 +71,7 @@ def bot_commands() -> list[BotCommand]:
         BotCommand(command="admission_programs", description="Совместимые программы 4К"),
         BotCommand(command="connect_program", description="Подключить программу 4К"),
         BotCommand(command="progress", description="Показать прогресс оценки"),
+        BotCommand(command="case_status", description="Проверить готовность кейса"),
         BotCommand(command="get_case", description="Получить или продолжить кейс"),
         BotCommand(command="case", description="Получить или продолжить кейс"),
         BotCommand(command="cancel", description="Отменить текущий диалог"),
@@ -256,6 +257,7 @@ async def start(
                 "/projects — мои проекты\n"
                 "/my_roles — мои роли\n"
                 "/get_case — получить или продолжить кейс после назначения оценки\n"
+                "/case_status — проверить готовность кейса\n"
                 "/progress — прогресс оценки\n"
                 "/feedback PROJECT_CODE — отправить отзыв преподавателю\n"
                 "/help — полный список команд"
@@ -292,6 +294,7 @@ async def help_command(message: Message) -> None:
         "/admission_programs ASSIGNMENT_ID — совместимые программы 4К\n"
         "/connect_program ASSIGNMENT_ID PROGRAM_ID — подключить программу\n"
         "/progress [ASSIGNMENT_ID] — канонический прогресс 4К\n"
+        "/case_status [ASSIGNMENT_ID] — готовность текущего кейса\n"
         "/get_case [ASSIGNMENT_ID] — получить или продолжить кейс\n"
         "/case [ASSIGNMENT_ID] — прежнее имя команды\n"
         "/cancel — отменить текущий диалог"
@@ -1357,6 +1360,67 @@ async def progress(
     await message.answer("\n\n".join(cards))
 
 
+def _current_case_status(state: EducationalChannelState) -> tuple[str, str]:
+    if state.state == "technical_failure":
+        return "неизвестно", "4К сообщил о технической ошибке. Повторите проверку позже."
+    if state.state == "cycle_completed":
+        return "0", "Оценка завершена."
+    if state.state == "preparing":
+        return "0", "4К готовит кейс."
+    if state.state == "waiting":
+        return "0", "Следующий кейс пока недоступен."
+    if state.state == "awaiting_admission":
+        return "0", "Подготовительные условия оценки ещё не выполнены."
+    if state.state == "action_required" and state.next_action is not None:
+        if state.next_action.action_type == "case_turn":
+            return "1", "Кейс уже открыт."
+        if state.next_action.action_type == "case_continue":
+            return "1", "Кейс подготовлен и доступен для запуска."
+        return "0", "Перед кейсом требуется выполнить подготовительный шаг."
+    return "неизвестно", "Не удалось определить готовность кейса."
+
+
+@router.message(Command("case_status"))
+async def case_status(
+    message: Message,
+    command: CommandObject,
+    assessment_service: AssessmentService,
+    agent4k_adapter: Agent4KPort,
+) -> None:
+    if message.chat.type != "private":
+        await message.answer("Статус кейса доступен только в личном чате с ботом.")
+        return
+    requested = (command.args or "").strip()
+    if requested and not requested.isdecimal():
+        await message.answer("Формат: /case_status [ASSIGNMENT_ID]")
+        return
+    identity = identity_from_message(message)
+    assignments = await assessment_service.my_channel_assignments(identity)
+    if requested:
+        assignments = [item for item in assignments if item.assignment_id == int(requested)]
+    if not assignments:
+        await message.answer("Нет доступных назначений с опубликованным контекстом.")
+        return
+    try:
+        for item in assignments:
+            state = await assessment_service.read_my_channel_state(
+                identity, assignment_id=item.assignment_id, adapter=agent4k_adapter,
+            )
+            count, description = _current_case_status(state)
+            await message.answer(
+                f"Назначение {item.assignment_id}\n"
+                f"{item.project_code} — {item.project_name}\n"
+                f"Роль: {item.role_name} ({item.role_code}) v{item.role_version}\n"
+                f"Готовых к прохождению кейсов сейчас: {count}\n"
+                f"{description}"
+                + (f"\nПродолжить: /get_case {item.assignment_id}"
+                   if state.state == "action_required" and state.next_action is not None
+                   else "")
+            )
+    except (AssessmentError, AccessDeniedError) as exc:
+        await message.answer(str(exc))
+
+
 @router.message(Command("prepare_cycle"))
 async def prepare_cycle(
     message: Message,
@@ -1469,8 +1533,9 @@ async def connect_program(
 def _channel_state_text(state: EducationalChannelState, assignment_id: int) -> str:
     next_action = getattr(state, "next_action", None)
     if next_action is None:
-        return {
-            "preparing": "Готовим первый кейс. Немного позже нажмите /get_case.",
+        text = {
+            "preparing": "Готовим кейс.",
+            "waiting": "Следующий кейс пока недоступен.",
             "awaiting_admission": (
                 "Преподаватель завершает подготовку оценки. Ваши ответы сохранены."
             ),
@@ -1479,6 +1544,9 @@ def _channel_state_text(state: EducationalChannelState, assignment_id: int) -> s
             ),
             "cycle_completed": "Прохождение оценки завершено.",
         }.get(state.state, "Сейчас действий не требуется. Повторите /progress позже.")
+        if state.state in {"preparing", "waiting"}:
+            text += f" Проверить готовность: /case_status {assignment_id}."
+        return text
     payload = next_action.participant_payload
     labels = {
         "acquaintance_consent": "Перед началом оценки ознакомьтесь с условиями:",

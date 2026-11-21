@@ -22,8 +22,8 @@ email-приглашения продолжают работать. Email
 
 Draft Telegram-канал студента описан в
 [`docs/sdd/student-channel-v1.md`](docs/sdd/student-channel-v1.md). `/get_case`
-(`/case` остаётся алиасом) и
-`/progress` читают 4К через adapter; бот хранит только техническую привязку
+(`/case` остаётся алиасом), `/progress` и `/case_status` читают 4К через adapter;
+бот хранит только техническую привязку
 текстового ответа и не рассчитывает Case или прогресс. До решения по рискам
 интеграции канал остаётся выключенным в общем контуре.
 
@@ -71,6 +71,7 @@ python -m app.main
 /admission_programs ASSIGNMENT_ID  показать совместимые опубликованные программы
 /connect_program ASSIGNMENT_ID PROGRAM_ID  явно подключить выбранную программу
 /progress     прогресс участника
+/case_status [ASSIGNMENT_ID]  готовность текущего кейса без оценки времени ожидания
 /get_case [ASSIGNMENT_ID]  получить или продолжить кейс после назначения оценки
 /cancel       отмена текущего диалога
 ```

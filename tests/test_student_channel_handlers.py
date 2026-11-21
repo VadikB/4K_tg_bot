@@ -7,6 +7,7 @@ from app.application.assessments import StudentChannelAssignmentView, SubmittedC
 from app.bot import (
     bot_commands,
     case_command,
+    case_status,
     channel_text_answer,
     progress,
     router,
@@ -91,10 +92,22 @@ class FakeChannelService:
         self.bindings: list[dict[str, object]] = []
         self.submissions: list[dict[str, object]] = []
         self.read_count = 0
+        self.state_result = channel_state()
 
     async def read_my_channel_state(self, *args: object, **kwargs: object):
         self.read_count += 1
-        return channel_state()
+        return self.state_result
+
+    async def my_channel_assignments(self, *args: object, **kwargs: object):
+        return [StudentChannelAssignmentView(
+            assignment_id=7,
+            assignment_ref="edu:4k-tg-bot:p1:a7",
+            project_code="SYNTH-DEMAND",
+            project_name="Прогноз спроса",
+            role_code="business_analyst",
+            role_name="Бизнес-аналитик",
+            role_version=1,
+        )]
 
     async def bind_my_channel_text_action(self, *args: object, **kwargs: object):
         self.bindings.append(kwargs)
@@ -106,11 +119,76 @@ class FakeChannelService:
 
 def test_get_case_appears_in_telegram_commands_and_uses_case_handler() -> None:
     assert "get_case" in [item.command for item in bot_commands()]
+    assert "case_status" in [item.command for item in bot_commands()]
     handler = next(item for item in router.message.handlers if item.callback is case_command)
     assert any(
         isinstance(item.callback, Command) and item.callback.commands == ("case", "get_case")
         for item in handler.filters
     )
+
+
+async def test_case_status_reads_current_availability_without_action() -> None:
+    service = FakeChannelService()
+    action = channel_state().next_action
+    assert action is not None
+    states_and_counts = (
+        (channel_state(), "1", "Кейс уже открыт"),
+        (replace(channel_state(), next_action=replace(action,
+            action_type="case_continue", input={"kind": "confirm"})), "1", "Кейс подготовлен"),
+        (replace(channel_state(), next_action=replace(action,
+            action_type="acquaintance_answer")), "0", "Перед кейсом"),
+        (replace(channel_state(), state="preparing", next_action=None), "0", "готовит кейс"),
+        (replace(channel_state(), state="waiting", next_action=None), "0", "пока недоступен"),
+        (replace(channel_state(), state="awaiting_admission", next_action=None),
+         "0", "условия оценки"),
+        (replace(channel_state(), state="cycle_completed", next_action=None),
+         "0", "Оценка завершена"),
+        (replace(channel_state(), state="technical_failure", next_action=None),
+         "неизвестно", "технической ошибке"),
+    )
+    for current, count, description in states_and_counts:
+        service.state_result = current
+        message = FakeMessage("/case_status 7")
+        await case_status(  # type: ignore[arg-type]
+            message, SimpleNamespace(args="7"), service, SimpleNamespace(),
+        )
+        assert f"Готовых к прохождению кейсов сейчас: {count}" in message.answers[0]
+        assert description in message.answers[0]
+        assert "2026-" not in message.answers[0]
+        assert ("/get_case 7" in message.answers[0]) == (
+            current.state == "action_required" and current.next_action is not None
+        )
+    assert service.read_count == len(states_and_counts)
+    assert not service.bindings
+    assert not service.submissions
+
+
+async def test_case_status_keeps_assignment_access_and_private_chat_boundary() -> None:
+    service = FakeChannelService()
+    other = FakeMessage("/case_status 8")
+    await case_status(  # type: ignore[arg-type]
+        other, SimpleNamespace(args="8"), service, SimpleNamespace(),
+    )
+    assert other.answers == ["Нет доступных назначений с опубликованным контекстом."]
+    group = FakeMessage("/case_status 7")
+    group.chat.type = "group"
+    await case_status(  # type: ignore[arg-type]
+        group, SimpleNamespace(args="7"), service, SimpleNamespace(),
+    )
+    assert group.answers == ["Статус кейса доступен только в личном чате с ботом."]
+    assert service.read_count == 0
+
+
+async def test_get_case_preparing_points_to_case_status() -> None:
+    service = FakeChannelService()
+    service.state_result = replace(channel_state(), state="preparing", next_action=None)
+    message = FakeMessage("/get_case 7")
+    await case_command(  # type: ignore[arg-type]
+        message, SimpleNamespace(args="7"), service, SimpleNamespace(),
+    )
+    assert "/case_status 7" in message.answers[0]
+    assert "Немного позже" not in message.answers[0]
+    assert not service.bindings
 
 
 async def test_case_binds_text_action_without_rendering_trace() -> None:
