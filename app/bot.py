@@ -136,7 +136,6 @@ def choice_keyboard(
 class AssessmentSpecWizard(StatesGroup):
     project_code = State()
     configuration = State()
-    required_case_count = State()
     period = State()
     recipient_policy = State()
 
@@ -1067,19 +1066,12 @@ async def spec_choice(
                 methodology_ref=option.methodology_ref,
                 configuration_name=option.name,
             )
-            await state.set_state(AssessmentSpecWizard.required_case_count)
-            await callback.message.answer("Сколько кейсов должен пройти участник?")
+            await state.set_state(AssessmentSpecWizard.period)
+            await callback.message.answer("Период: ДД.ММ.ГГГГ ДД.ММ.ГГГГ или '-':")
     except (AccessDeniedError, AssessmentError, Agent4KUnavailableError) as exc:
         await state.clear()
         await callback.message.answer(f"Настройка оценки не выполнена: {exc}")
     await callback.answer()
-
-
-@router.message(AssessmentSpecWizard.required_case_count, F.text)
-async def spec_case_count(message: Message, state: FSMContext) -> None:
-    await state.update_data(required_case_count=message.text)
-    await state.set_state(AssessmentSpecWizard.period)
-    await message.answer("Период: ДД.ММ.ГГГГ ДД.ММ.ГГГГ или '-':")
 
 
 @router.message(AssessmentSpecWizard.period, F.text)
@@ -1120,7 +1112,7 @@ async def spec_recipient_policy(
             assessment_configuration_ref=str(data["assessment_configuration_ref"]),
             assessment_configuration_checksum=str(data["assessment_configuration_checksum"]),
             methodology_ref=str(data["methodology_ref"]),
-            required_case_count=int(str(data["required_case_count"])),
+            required_case_count=None,
             available_from=data["available_from"],
             available_until=data["available_until"],
             result_recipient_policy={
@@ -1148,9 +1140,9 @@ async def spec_recipient_policy(
     await message.answer(
         f"Проверьте настройки оценки проекта {project_code}:\n"
         f"Конфигурация 4К: {data.get('configuration_name', draft.assessment_configuration_ref)}\n"
-        f"Количество кейсов: {result.required_case_count}\n"
         f"Период: {period}\n"
         f"Результат получат: {recipient}.\n\n"
+        "Состав и количество кейсов определит 4К при подготовке оценки.\n\n"
         "После утверждения эта версия настроек будет зафиксирована.\n"
         "Оценка ещё не запущена. Готовность к запуску в 4К проверяется отдельно.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -1249,8 +1241,10 @@ async def specs(
                 )
             ]])
         await message.answer(
-            f"Настройки оценки проекта {item.project_code}, версия {item.version}: {status}.\n"
-            f"Количество кейсов: {item.required_case_count}.\n"
+            f"Настройки оценки проекта {item.project_code}, версия {item.version}: {status}.\n" +
+            (f"Количество кейсов: {item.required_case_count}.\n"
+             if item.required_case_count is not None
+             else "Количество кейсов определит 4К при подготовке оценки.\n") +
             "Утверждение настроек само по себе не запускает оценку.",
             reply_markup=markup,
         )

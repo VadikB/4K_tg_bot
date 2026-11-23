@@ -1077,6 +1077,42 @@ async def test_published_spec_assigns_exact_role_and_exposes_progress(
         assert stored.external_cycle_id is None
 
 
+async def test_new_spec_keeps_4k_case_count_unset(database_url: str) -> None:
+    assessments, admin, student, participant_id = await assessment_fixture(database_url)
+    created = await assessments.create_spec_draft(
+        admin, project_code="TBA-2026-G01",
+        draft=replace(sample_spec(), required_case_count=None),
+    )
+    assert created.required_case_count is None
+    await assessments.publish_spec(admin, project_code="TBA-2026-G01")
+    assignment = await assessments.assign(
+        admin, project_code="TBA-2026-G01",
+        participant_id=participant_id, role_code="business_analyst",
+    )
+    assert assignment.required_cases is None
+    assert assignment.remaining_cases is None
+    progress = await assessments.my_progress(student)
+    assert progress[0].required_cases is None
+    assert progress[0].remaining_cases is None
+    factory = session_factory(database_url)
+    async with factory() as session:
+        spec = await session.scalar(select(ProjectAssessmentSpec))
+        assert spec is not None
+        assert spec.required_case_count is None
+        assert spec.snapshot_json["schema_version"] == 2
+        assert "required_case_count" not in spec.snapshot_json
+    async with factory.begin() as session:
+        participant = await session.get(ProjectParticipant, participant_id)
+        assert participant is not None
+        participant.agent4k_user_id = 42001
+        participant.agent4k_linked_at = datetime.now(UTC)
+    context = await assessments.publish_context_snapshot(admin, assignment_id=assignment.id)
+    async with factory() as session:
+        saved = await session.get(ProjectAssessmentContextSnapshot, context.id)
+        assert saved is not None
+        assert "required_case_count" not in saved.snapshot_json["assessment_spec"]
+
+
 async def test_synthetic_semester_multi_project_role_assignment_readback(
     database_url: str,
 ) -> None:

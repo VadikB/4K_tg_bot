@@ -55,7 +55,7 @@ class AssessmentSpecDraft:
     assessment_configuration_ref: str
     assessment_configuration_checksum: str
     methodology_ref: str
-    required_case_count: int
+    required_case_count: int | None
     available_from: date | None
     available_until: date | None
     result_recipient_policy: str
@@ -66,7 +66,7 @@ class AssessmentSpecView:
     project_code: str
     version: int
     status: str
-    required_case_count: int
+    required_case_count: int | None
     checksum: str
     runtime_admission: str
 
@@ -79,9 +79,9 @@ class AssessmentAssignmentView:
     role_version: int
     spec_version: int
     status: str
-    required_cases: int
+    required_cases: int | None
     completed_cases: int
-    remaining_cases: int
+    remaining_cases: int | None
     has_active_case: bool
     runtime_connected: bool
 
@@ -131,7 +131,7 @@ def validate_spec_draft(draft: AssessmentSpecDraft) -> AssessmentSpecDraft:
         raise ValueError("Checksum конфигурации должен быть SHA-256 из 64 hex-символов.")
     if not methodology_ref or len(methodology_ref) > 255:
         raise ValueError("Укажите ссылку на версию методологии.")
-    if not 1 <= draft.required_case_count <= 100:
+    if draft.required_case_count is not None and not 1 <= draft.required_case_count <= 100:
         raise ValueError("Число кейсов должно быть от 1 до 100.")
     if draft.available_from and draft.available_until:
         if draft.available_until < draft.available_from:
@@ -217,7 +217,7 @@ class AssessmentService:
             version = int(latest or 0) + 1
             available_from, available_until = _period(validated, project.timezone)
             snapshot = {
-                "schema_version": 1,
+                "schema_version": 2 if validated.required_case_count is None else 1,
                 "kind": "project_assessment_spec",
                 "project_code": project.code,
                 "version": version,
@@ -226,7 +226,6 @@ class AssessmentService:
                     "checksum": validated.assessment_configuration_checksum,
                 },
                 "methodology_ref": validated.methodology_ref,
-                "required_case_count": validated.required_case_count,
                 "daily_case_limit": 1,
                 "timezone": project.timezone,
                 "available_from": available_from.isoformat() if available_from else None,
@@ -234,6 +233,8 @@ class AssessmentService:
                 "result_recipient_policy": validated.result_recipient_policy,
                 "runtime_admission": "pending_agent4k_verification",
             }
+            if validated.required_case_count is not None:
+                snapshot["required_case_count"] = validated.required_case_count
             checksum = definition_checksum(snapshot)
             spec = ProjectAssessmentSpec(
                 project_id=project.id,
@@ -498,6 +499,24 @@ class AssessmentService:
                 )
             )
             assignment_ref = f"edu:4k-tg-bot:p{project.id}:a{assignment.id}"
+            assessment_spec_snapshot: dict[str, object] = {
+                "version": spec.version,
+                "checksum": spec.checksum,
+                "assessment_configuration_ref": spec.assessment_configuration_ref,
+                "assessment_configuration_checksum": spec.assessment_configuration_checksum,
+                "methodology_ref": spec.methodology_ref,
+                "daily_case_limit": spec.daily_case_limit,
+                "timezone": spec.timezone,
+                "available_from": (
+                    spec.available_from.isoformat() if spec.available_from else None
+                ),
+                "available_until": (
+                    spec.available_until.isoformat() if spec.available_until else None
+                ),
+                "result_recipient_policy": spec.result_recipient_policy,
+            }
+            if spec.required_case_count is not None:
+                assessment_spec_snapshot["required_case_count"] = spec.required_case_count
             snapshot = {
                 "schema_version": 1,
                 "kind": "educational_project_assessment_context",
@@ -540,25 +559,7 @@ class AssessmentService:
                     "agent4k_role_profile_version_id": role_profile_id,
                     "agent4k_role_profile_checksum": role_profile_checksum,
                 },
-                "assessment_spec": {
-                    "version": spec.version,
-                    "checksum": spec.checksum,
-                    "assessment_configuration_ref": spec.assessment_configuration_ref,
-                    "assessment_configuration_checksum": (
-                        spec.assessment_configuration_checksum
-                    ),
-                    "methodology_ref": spec.methodology_ref,
-                    "required_case_count": spec.required_case_count,
-                    "daily_case_limit": spec.daily_case_limit,
-                    "timezone": spec.timezone,
-                    "available_from": (
-                        spec.available_from.isoformat() if spec.available_from else None
-                    ),
-                    "available_until": (
-                        spec.available_until.isoformat() if spec.available_until else None
-                    ),
-                    "result_recipient_policy": spec.result_recipient_policy,
-                },
+                "assessment_spec": assessment_spec_snapshot,
             }
             checksum = definition_checksum(snapshot)
             context = ProjectAssessmentContextSnapshot(
@@ -819,7 +820,8 @@ class AssessmentService:
                         assignment.status,
                         spec.required_case_count,
                         completed,
-                        max(spec.required_case_count - completed, 0),
+                        max(spec.required_case_count - completed, 0)
+                        if spec.required_case_count is not None else None,
                         active,
                         assignment.external_cycle_id is not None,
                     )

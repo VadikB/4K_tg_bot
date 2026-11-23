@@ -36,6 +36,10 @@ def test_case_count_is_bounded() -> None:
         validate_spec_draft(spec_draft(required_case_count=0))
 
 
+def test_case_count_may_be_owned_by_4k() -> None:
+    assert validate_spec_draft(spec_draft(required_case_count=None)).required_case_count is None
+
+
 def test_result_recipient_policy_is_closed() -> None:
     with pytest.raises(ValueError, match="политика"):
         validate_spec_draft(spec_draft(result_recipient_policy="everyone"))
