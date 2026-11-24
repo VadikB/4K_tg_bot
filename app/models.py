@@ -214,7 +214,7 @@ class ProjectAssessmentSpec(Base, TimestampMixin):
     assessment_configuration_ref: Mapped[str] = mapped_column(String(255))
     assessment_configuration_checksum: Mapped[str] = mapped_column(String(64))
     methodology_ref: Mapped[str] = mapped_column(String(255))
-    required_case_count: Mapped[int]
+    required_case_count: Mapped[int | None]
     daily_case_limit: Mapped[int] = mapped_column(default=1)
     timezone: Mapped[str] = mapped_column(String(64))
     available_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

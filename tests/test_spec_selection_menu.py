@@ -100,7 +100,8 @@ async def test_spec_wizard_selects_project_and_published_configuration(monkeypat
     await spec_choice(
         FakeCallback(message, f"sp:{token}:configuration:0"), state, projects, adapter
     )
-    assert state.current == AssessmentSpecWizard.required_case_count.state
+    assert state.current == AssessmentSpecWizard.period.state
+    assert "Период" in message.answers[-1][0]
     assert state.data["assessment_configuration_ref"] == "agent4k:configuration:17"
     assert state.data["assessment_configuration_checksum"] == "a" * 64
     assert state.data["methodology_ref"] == "agent4k:methodology:m1:v2"
@@ -167,21 +168,22 @@ async def test_recipient_button_preserves_service_contract(label, policy):
     state = FakeState()
     state.data = dict(project_code="PRJ-1", assessment_configuration_ref="cfg",
         assessment_configuration_checksum="a" * 64, methodology_ref="m1",
-        required_case_count="5", available_from=None, available_until=None)
+        available_from=None, available_until=None)
 
     class Service:
         async def create_spec_draft(self, identity, *, project_code, draft):
             assert identity.telegram_user_id == 11
             assert project_code == "PRJ-1"
             assert draft.result_recipient_policy == policy
-            return SimpleNamespace(version=1, required_case_count=5,
+            assert draft.required_case_count is None
+            return SimpleNamespace(version=1, required_case_count=None,
                 checksum="b" * 64, runtime_admission="pending")
 
     await bot_module.spec_recipient_policy(message, state, Service())
     assert state.data == {}
     assert message.answers[-2][1].remove_keyboard
     text, markup = message.answers[-1]
-    assert "Количество кейсов: 5" in text
+    assert "Состав и количество кейсов определит 4К" in text
     assert "Период: без ограничения по датам" in text
     assert "Checksum" not in text and "Runtime" not in text and "Draft" not in text
     assert markup.inline_keyboard[0][0].text == "Утвердить настройки"
